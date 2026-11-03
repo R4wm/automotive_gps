@@ -18,6 +18,10 @@ DEFAULT_PORT = "/dev/ttyUSB0"
 DEFAULT_BAUD = 4800
 DEFAULT_IDLE_IMAGE = Path("/usr/local/share/automotive_gps/fat_shy-guy.gif")
 DEFAULT_IDLE_MAX_MPH = 3.0
+SPI_SPEED_HZ = 10_000_000  # Pimoroni Enviro examples; faster full-frame updates
+DEFAULT_IDLE_GIF_SPEED = 2.5  # multiply GIF frame rate (1 = file timing)
+LOOP_SLEEP_IDLE = 0.008
+LOOP_SLEEP_NORMAL = 0.025
 
 # Display (160x80 landscape after rotation=270)
 MARGIN = 6
@@ -108,7 +112,7 @@ def compose_idle_frame(source: Image.Image, width: int, height: int) -> Image.Im
 
 
 def load_idle_frames(
-    path: Path, width: int, height: int
+    path: Path, width: int, height: int, gif_speed: float
 ) -> tuple[list[Image.Image], list[float]]:
     if not path.is_file():
         return [], []
@@ -127,7 +131,10 @@ def load_idle_frames(
             break
         frames.append(compose_idle_frame(source, width, height))
         ms = source.info.get("duration")
-        durations.append(max((ms or 100) / 1000.0, 0.05))
+        sec = (ms or 100) / 1000.0
+        if gif_speed > 0:
+            sec /= gif_speed
+        durations.append(max(sec, 0.02))
         index += 1
 
     if not frames:
@@ -171,6 +178,12 @@ def main() -> None:
         dest="no_idle_image",
         help="Always show numeric speed",
     )
+    parser.add_argument(
+        "--idle-gif-speed",
+        type=float,
+        default=DEFAULT_IDLE_GIF_SPEED,
+        help="Idle GIF speed multiplier (default: 2.5)",
+    )
     args = parser.parse_args()
 
     disp = st7735.ST7735(
@@ -179,7 +192,7 @@ def main() -> None:
         dc=9,
         backlight=12,
         rotation=270,
-        spi_speed_hz=6000000,
+        spi_speed_hz=SPI_SPEED_HZ,
     )
     disp.begin()
     disp.set_backlight(1)
@@ -188,7 +201,10 @@ def main() -> None:
     idle_durations: list[float] = []
     if not args.no_idle_image:
         idle_frames, idle_durations = load_idle_frames(
-            args.idle_image, disp.width, disp.height
+            args.idle_image,
+            disp.width,
+            disp.height,
+            max(args.idle_gif_speed, 0.1),
         )
 
     img = Image.new("RGB", (disp.width, disp.height), BG)
@@ -294,7 +310,10 @@ def main() -> None:
                 shown_key = key
                 last_speed_draw = now
 
-        time.sleep(0.08)
+        if key == "idle" and len(idle_frames) > 1:
+            time.sleep(LOOP_SLEEP_IDLE)
+        else:
+            time.sleep(LOOP_SLEEP_NORMAL)
 
 
 if __name__ == "__main__":
