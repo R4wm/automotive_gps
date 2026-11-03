@@ -13,7 +13,7 @@ Raspberry Pi Zero W (DietPi) in-car display: USB GPS speed on a Pimoroni **Scrol
 
 | Component | Behavior |
 |-----------|----------|
-| **enviro-gps-speed** | **Enviro LCD:** large integer speed, full backlight (system service) |
+| **enviro-gps-speed** | **Enviro LCD:** large integer speed; **PNG at 0–3 mph** (`assets/idle.png`), full backlight |
 | **scroll-hat-manager** | Scroll HAT: GPS speed; **button A** cycles GPS ↔ ESTHER scroll |
 | **gps-speed-hat** / **scroll-esther** | Standalone scripts (same logic as manager modes) |
 | **car-wifi** | `allow-hotplug wlan0`; WiFi comes up in background after boot; wpa_supplicant keeps scanning |
@@ -85,7 +85,10 @@ The phone is the DHCP gateway; SSH from the phone to the Pi on the same hotspot 
 scroll-hat-manager    # production (systemd)
 gps-speed-hat         # speed only
 scroll-esther         # scroll only
+enviro-gps-speed        # Enviro LCD (same as systemd service)
 ```
+
+**Enviro idle image:** At **0–3 mph** (rounded), the LCD shows `/usr/local/share/automotive_gps/idle.png` instead of the number. Replace that file with your own PNG (any size; scaled to fit **160×80**), or edit `assets/idle.png` in the repo and re-run `install.sh`. Options: `--idle-max-mph 5`, `--idle-png /path/to.png`, `--no-idle-png`.
 
 ## Repository layout
 
