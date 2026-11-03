@@ -125,6 +125,8 @@ def main() -> None:
     shown_text = ""
     backlight = BRIGHTNESS_MAX
     last_lux_sample = 0.0
+    last_serial_open = 0.0
+    SERIAL_REOPEN_SEC = 2.0
 
     def apply_backlight(percent: float) -> None:
         duty = int(max(0, min(100, round(percent))))
@@ -144,24 +146,47 @@ def main() -> None:
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
 
-    try:
-        ser = serial.Serial(args.port, args.baud, timeout=0.15)
-    except (OSError, serial.SerialException):
+    def close_serial() -> None:
+        nonlocal ser
+        if ser is None:
+            return
+        try:
+            ser.close()
+        except OSError:
+            pass
         ser = None
 
+    def open_serial() -> bool:
+        nonlocal ser, last_serial_open
+        close_serial()
+        try:
+            ser = serial.Serial(args.port, args.baud, timeout=0.15)
+        except (OSError, serial.SerialException):
+            ser = None
+        last_serial_open = time.monotonic()
+        return ser is not None
+
+    open_serial()
+
     while True:
+        now = time.monotonic()
         mph = last_mph
         if ser is not None:
-            for _ in range(16):
-                raw = ser.readline()
-                if not raw:
-                    break
-                parsed = parse_rmc_speed_mph(raw.decode("ascii", errors="ignore"))
-                if parsed is not None:
-                    mph = parsed
+            try:
+                for _ in range(16):
+                    raw = ser.readline()
+                    if not raw:
+                        break
+                    parsed = parse_rmc_speed_mph(
+                        raw.decode("ascii", errors="ignore")
+                    )
+                    if parsed is not None:
+                        mph = parsed
+            except serial.SerialException:
+                close_serial()
+        elif now - last_serial_open >= SERIAL_REOPEN_SEC:
+            open_serial()
         last_mph = mph
-
-        now = time.monotonic()
         text = format_speed(mph)
         speed_due = (
             text != shown_text
