@@ -267,19 +267,12 @@ def main() -> None:
     disp.begin()
     disp.set_backlight(1)
 
-    idle_clips: list[IdleClip] = []
-    gif_speed = max(args.idle_gif_speed, 0.1)
-    if not args.no_idle_image:
-        idle_clips = load_idle_playlist(
-            args.idle_dir,
-            disp.width,
-            disp.height,
-            gif_speed,
-            args.idle_image,
-        )
-
     img = Image.new("RGB", (disp.width, disp.height), BG)
     draw = ImageDraw.Draw(img)
+
+    idle_clips: list[IdleClip] = []
+    idle_clips_loaded = args.no_idle_image
+    gif_speed = max(args.idle_gif_speed, 0.1)
 
     mileage: MileageStore | None = None
     last_mileage_flush = time.monotonic()
@@ -301,6 +294,19 @@ def main() -> None:
         draw.rectangle((0, 0, disp.width, disp.height), fill=BG)
         draw_text_centered(draw, text, font, disp.width, disp.height, FG)
         disp.display(img)
+
+    def ensure_idle_clips() -> None:
+        nonlocal idle_clips, idle_clips_loaded
+        if idle_clips_loaded:
+            return
+        idle_clips = load_idle_playlist(
+            args.idle_dir,
+            disp.width,
+            disp.height,
+            gif_speed,
+            args.idle_image,
+        )
+        idle_clips_loaded = True
 
     def paint_idle_at(clip_index: int, frame_index: int) -> None:
         if not idle_clips:
@@ -362,6 +368,8 @@ def main() -> None:
         last_serial_open = time.monotonic()
         return ser is not None
 
+    paint_speed_text(NO_FIX_TEXT)
+
     if not args.no_mileage:
         try:
             mileage = MileageStore()
@@ -395,6 +403,8 @@ def main() -> None:
             if mileage.maybe_flush(now, last_mileage_flush):
                 last_mileage_flush = now
 
+        if not args.no_idle_image:
+            ensure_idle_clips()
         idle_enabled = not args.no_idle_image and bool(idle_clips)
         key = display_key(mph, args.idle_max_mph, idle_enabled)
 

@@ -1,6 +1,9 @@
 [Unit]
 Description=Enviro LCD GPS speed
-After=multi-user.target
+# Start as soon as storage + SPI are up (do not wait for WiFi / multi-user stack)
+After=local-fs.target
+After=systemd-udev-settle.service
+Before=network-pre.target
 StartLimitIntervalSec=0
 
 [Service]

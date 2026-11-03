@@ -14,6 +14,10 @@
 
 On startup, the service merges file and Redis and keeps the **higher odometer** so you do not lose distance.
 
+## Boot / display timing
+
+On a Pi Zero, DietPi often reaches **`enviro-gps-speed`** around **~35–40 s** after power (networking / `ifupdown-pre` dominate). The LCD should show **`--`** within a few seconds of the service start; a **GPS speed number** can take longer (cold GPS fix). The service is configured to start after local storage is ready, not after WiFi.
+
 ## Pi setup
 
 ```bash
