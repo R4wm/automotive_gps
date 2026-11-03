@@ -8,6 +8,7 @@ import signal
 import sys
 import time
 
+import RPi.GPIO as GPIO
 import ST7735 as st7735
 import serial
 from PIL import Image, ImageDraw, ImageFont
@@ -28,6 +29,8 @@ NO_FIX_TEXT = "--"
 BRIGHTNESS_MIN = 10.0
 BRIGHTNESS_MAX = 100.0
 LUX_SMOOTH = 0.82  # higher = slower brightness changes
+BACKLIGHT_PIN = 12
+BACKLIGHT_PWM_HZ = 1000
 
 
 def parse_rmc_speed_mph(line: str) -> float | None:
@@ -104,7 +107,11 @@ def main() -> None:
         spi_speed_hz=6000000,
     )
     disp.begin()
-    disp.set_backlight(BRIGHTNESS_MAX)
+    # ST7735 0.0.5: set_backlight is GPIO on/off only; use PWM for levels.
+    disp.set_backlight(1)
+    GPIO.setmode(GPIO.BCM)
+    backlight_pwm = GPIO.PWM(BACKLIGHT_PIN, BACKLIGHT_PWM_HZ)
+    backlight_pwm.start(int(BRIGHTNESS_MAX))
 
     bus = SMBus(1)
     ltr = LTR559(i2c_dev=bus)
@@ -119,8 +126,16 @@ def main() -> None:
     backlight = BRIGHTNESS_MAX
     last_lux_sample = 0.0
 
+    def apply_backlight(percent: float) -> None:
+        duty = int(max(0, min(100, round(percent))))
+        backlight_pwm.ChangeDutyCycle(duty)
+
     def stop(_signum=None, _frame=None) -> None:
-        disp.set_backlight(0)
+        try:
+            backlight_pwm.stop()
+        except RuntimeError:
+            pass
+        GPIO.output(BACKLIGHT_PIN, GPIO.LOW)
         if ser is not None:
             ser.close()
         bus.close()
@@ -173,7 +188,7 @@ def main() -> None:
             except OSError:
                 target = backlight
             backlight = LUX_SMOOTH * backlight + (1.0 - LUX_SMOOTH) * target
-            disp.set_backlight(int(round(backlight)))
+            apply_backlight(backlight)
 
         time.sleep(0.08)
 
