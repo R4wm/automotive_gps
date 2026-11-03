@@ -1,8 +1,9 @@
-"""GPS speed–based mileage with Redis + local JSON (upload / inspect later)."""
+"""GPS mileage from position deltas while driving (Redis + local JSON)."""
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import socket
 from datetime import datetime, timezone
@@ -19,6 +20,15 @@ DEFAULT_REDIS_URL = "redis://127.0.0.1:6379/0"
 DEFAULT_KEY_PREFIX = "automotive_gps"
 REDIS_HASH_KEY = "mileage"
 
+# Parked GPS often reports 2–5 mph; integrating speed caused false miles indoors.
+EARTH_RADIUS_MI = 3958.7613
+DEFAULT_DRIVING_ENTER_MPH = 5.0
+DEFAULT_DRIVING_ENTER_SEC = 4.0
+DEFAULT_PARKED_MAX_MPH = 2.0
+DEFAULT_PARKED_HOLD_SEC = 45.0
+DEFAULT_MAX_SEGMENT_MI = 0.12
+DEFAULT_MAX_IMPLIED_MPH = 120.0
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -26,6 +36,33 @@ def _utc_now() -> str:
 
 def default_device_id() -> str:
     return os.environ.get("MILEAGE_DEVICE_ID") or socket.gethostname()
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in miles."""
+    rlat1, rlon1, rlat2, rlon2 = (
+        math.radians(lat1),
+        math.radians(lon1),
+        math.radians(lat2),
+        math.radians(lon2),
+    )
+    dlat = rlat2 - rlat1
+    dlon = rlon2 - rlon1
+    a = math.sin(dlat / 2) ** 2 + math.cos(rlat1) * math.cos(rlat2) * math.sin(
+        dlon / 2
+    ) ** 2
+    c = 2 * math.asin(min(1.0, math.sqrt(a)))
+    return EARTH_RADIUS_MI * c
 
 
 class MileageStore:
@@ -51,6 +88,11 @@ class MileageStore:
         self.updated_at = _utc_now()
         self._pending_miles = 0.0
         self._last_tick: float | None = None
+        self._last_pos: tuple[float, float] | None = None
+        self._last_pos_at: float | None = None
+        self._driving = False
+        self._fast_since: float | None = None
+        self._slow_since: float | None = None
         self._redis: Any = None
 
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -157,17 +199,77 @@ class MileageStore:
             "updated_at": self.updated_at,
         }
 
-    def tick(self, mph: float | None, now: float, *, min_mph: float = 1.0) -> None:
+    def tick(
+        self,
+        mph: float | None,
+        now: float,
+        *,
+        lat: float | None = None,
+        lon: float | None = None,
+        fix_ok: bool = False,
+    ) -> None:
+        """Add distance only while driving, from GPS position deltas (not raw speed)."""
+        enter_mph = _env_float("MILEAGE_DRIVING_ENTER_MPH", DEFAULT_DRIVING_ENTER_MPH)
+        enter_sec = _env_float("MILEAGE_DRIVING_ENTER_SEC", DEFAULT_DRIVING_ENTER_SEC)
+        parked_mph = _env_float("MILEAGE_PARKED_MAX_MPH", DEFAULT_PARKED_MAX_MPH)
+        parked_sec = _env_float("MILEAGE_PARKED_HOLD_SEC", DEFAULT_PARKED_HOLD_SEC)
+        max_seg = _env_float("MILEAGE_MAX_SEGMENT_MI", DEFAULT_MAX_SEGMENT_MI)
+        max_implied = _env_float("MILEAGE_MAX_IMPLIED_MPH", DEFAULT_MAX_IMPLIED_MPH)
+
         if self._last_tick is None:
             self._last_tick = now
+
+        if mph is None or not fix_ok or lat is None or lon is None:
+            self._slow_since = None
+            self._fast_since = None
             return
-        dt = now - self._last_tick
-        self._last_tick = now
-        if dt <= 0 or dt > 30:
+
+        if mph >= enter_mph:
+            self._slow_since = None
+            if self._fast_since is None:
+                self._fast_since = now
+            elif now - self._fast_since >= enter_sec:
+                self._driving = True
+        elif mph <= parked_mph:
+            self._fast_since = None
+            if self._slow_since is None:
+                self._slow_since = now
+            elif now - self._slow_since >= parked_sec:
+                self._driving = False
+                self._last_pos = (lat, lon)
+                self._last_pos_at = now
+        else:
+            self._fast_since = None
+            self._slow_since = None
+
+        if not self._driving:
+            self._last_pos = (lat, lon)
+            self._last_pos_at = now
             return
-        if mph is None or mph < min_mph:
+
+        if self._last_pos is None or self._last_pos_at is None:
+            self._last_pos = (lat, lon)
+            self._last_pos_at = now
             return
-        delta = mph * (dt / 3600.0)
+
+        delta = haversine_miles(self._last_pos[0], self._last_pos[1], lat, lon)
+        dt = now - self._last_pos_at
+        self._last_pos = (lat, lon)
+        self._last_pos_at = now
+
+        if delta <= 0.0 or dt <= 0.0 or dt > 30.0:
+            return
+        if delta > max_seg:
+            return
+        implied_mph = delta / (dt / 3600.0)
+        if implied_mph > max_implied:
+            return
+
+        self._add_miles(delta)
+
+    def _add_miles(self, delta: float) -> None:
+        if delta <= 0.0:
+            return
         self.odometer_miles += delta
         self.trip_miles += delta
         self._pending_miles += delta

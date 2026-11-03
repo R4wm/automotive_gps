@@ -8,3 +8,9 @@ MILEAGE_KEY_PREFIX=automotive_gps
 
 # Set to 1 to disable mileage tracking
 # MILEAGE_DISABLE=0
+
+# Mileage: position deltas only while driving (avoids parked GPS speed drift)
+# MILEAGE_DRIVING_ENTER_MPH=5
+# MILEAGE_DRIVING_ENTER_SEC=4
+# MILEAGE_PARKED_MAX_MPH=2
+# MILEAGE_PARKED_HOLD_SEC=45

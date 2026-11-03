@@ -58,25 +58,62 @@ NO_GPS_TEXT = "--"
 GPS_STALE_SEC = 5.0
 
 
-def parse_rmc_line(line: str) -> tuple[bool, float | None, bool]:
-    """Return (is_rmc, mph, fix_ok). mph set for A or 0.0 for V."""
+def _nmea_degrees(raw: str) -> float:
+    """Convert NMEA ddmm.mmmm to decimal degrees."""
+    value = float(raw)
+    degrees = int(value / 100)
+    minutes = value - degrees * 100
+    return degrees + minutes / 60.0
+
+
+def parse_rmc_lat_lon(parts: list[str]) -> tuple[float, float] | None:
+    if len(parts) < 7:
+        return None
+    lat_raw, lat_dir, lon_raw, lon_dir = (
+        parts[3],
+        parts[4],
+        parts[5],
+        parts[6],
+    )
+    if not lat_raw or not lon_raw or lat_dir not in ("N", "S") or lon_dir not in (
+        "W",
+        "E",
+    ):
+        return None
+    try:
+        lat = _nmea_degrees(lat_raw)
+        lon = _nmea_degrees(lon_raw)
+    except ValueError:
+        return None
+    if lat_dir == "S":
+        lat = -lat
+    if lon_dir == "W":
+        lon = -lon
+    return lat, lon
+
+
+def parse_rmc_line(
+    line: str,
+) -> tuple[bool, float | None, bool, tuple[float, float] | None]:
+    """Return (is_rmc, mph, fix_ok, lat_lon). mph set for A or 0.0 for V."""
     line = line.strip()
     if len(line) < 10 or line[0] != "$":
-        return False, None, False
+        return False, None, False, None
     if not line.split(",", 1)[0].endswith("RMC"):
-        return False, None, False
+        return False, None, False, None
     parts = line.split(",")
     if len(parts) < 8:
-        return True, 0.0, False
+        return True, 0.0, False, None
     if parts[2] == "V":
-        return True, 0.0, False
+        return True, 0.0, False, None
     if parts[2] != "A":
-        return True, None, False
+        return True, None, False, None
+    lat_lon = parse_rmc_lat_lon(parts)
     try:
         knots = float(parts[7])
     except ValueError:
-        return True, 0.0, True
-    return True, max(0.0, knots * KNOTS_TO_MPH), True
+        return True, 0.0, True, lat_lon
+    return True, max(0.0, knots * KNOTS_TO_MPH), True, lat_lon
 
 
 def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -305,6 +342,8 @@ def main() -> None:
 
     ser: serial.Serial | None = None
     last_mph: float | None = None
+    last_lat_lon: tuple[float, float] | None = None
+    last_fix_ok = False
     last_rmc_at = 0.0
     last_speed_draw = 0.0
     last_idle_anim = 0.0
@@ -324,11 +363,10 @@ def main() -> None:
 
     def paint_personal_records() -> None:
         draw.rectangle((0, 0, disp.width, disp.height), fill=BG)
-        label_font = load_font(14)
-        value_font = load_font(17)
         odometer = int(round(mileage.odometer_miles)) if mileage else 0
         if records is None:
             rows = [
+                ("1/8", "--"),
                 ("0-60", "--"),
                 ("20-60", "--"),
                 ("TOP", "--"),
@@ -336,16 +374,19 @@ def main() -> None:
             ]
         else:
             rows = [
+                ("1/8", format_sec(records.best_eighth_mile_sec)),
                 ("0-60", format_sec(records.best_zero_sixty_sec)),
                 ("20-60", format_sec(records.best_twenty_sixty_sec)),
                 ("TOP", str(int(round(records.top_speed_mph)))),
                 ("MI", str(odometer)),
             ]
-        y = 5
+        label_font = load_font(13)
+        value_font = load_font(15)
+        y = 2
         for label, value in rows:
-            draw.text((6, y), label, font=label_font, fill=(140, 140, 140))
-            draw.text((72, y - 1), value, font=value_font, fill=FG)
-            y += 19
+            draw.text((4, y), label, font=label_font, fill=(140, 140, 140))
+            draw.text((68, y - 1), value, font=value_font, fill=FG)
+            y += 16
         disp.display(img)
 
     def ensure_idle_clips() -> None:
@@ -455,15 +496,23 @@ def main() -> None:
                     raw = ser.readline()
                     if not raw:
                         break
-                    is_rmc, parsed, fix_ok = parse_rmc_line(
+                    is_rmc, parsed, fix_ok, lat_lon = parse_rmc_line(
                         raw.decode("ascii", errors="ignore")
                     )
                     if is_rmc:
                         last_rmc_at = now
+                        last_fix_ok = fix_ok
+                        if lat_lon is not None:
+                            last_lat_lon = lat_lon
                         if parsed is not None:
                             mph = parsed
                         if records is not None and parsed is not None and fix_ok:
-                            records.tick_speed(parsed, now, fix_ok=True)
+                            rlat = rlon = None
+                            if lat_lon is not None:
+                                rlat, rlon = lat_lon
+                            records.tick_speed(
+                                parsed, now, fix_ok=True, lat=rlat, lon=rlon
+                            )
                             if records.maybe_flush(now, last_records_flush):
                                 last_records_flush = now
             except serial.SerialException:
@@ -476,7 +525,16 @@ def main() -> None:
         display_mph = mph if gps_live else None
 
         if mileage is not None:
-            mileage.tick(display_mph if gps_live else None, now)
+            lat = lon = None
+            if gps_live and last_fix_ok and last_lat_lon is not None:
+                lat, lon = last_lat_lon
+            mileage.tick(
+                display_mph if gps_live else None,
+                now,
+                lat=lat,
+                lon=lon,
+                fix_ok=gps_live and last_fix_ok,
+            )
             if mileage.maybe_flush(now, last_mileage_flush):
                 last_mileage_flush = now
 

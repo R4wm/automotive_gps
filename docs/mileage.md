@@ -1,6 +1,6 @@
 # Mileage tracking
 
-`enviro-gps-speed` integrates GPS speed (mph) over time while you drive and stores:
+`enviro-gps-speed` adds **distance from GPS position** only while the receiver looks like it is **actually driving** (not parked with speed jitter):
 
 | Field | Meaning |
 |--------|---------|
@@ -54,7 +54,16 @@ redis-cli HGETALL automotive_gps:mileage
 
 Copy `/var/lib/automotive_gps/odometer.json` or pipe `automotive-gps-miles --export` into your sync script.
 
-Only speed **≥ 1 mph** with a GPS fix counts (idle / parking jitter is ignored).
+**Parked / indoor drift:** raw NMEA speed often reads 2–5 mph while you are still; the old speed integrator could add a fake mile overnight. Mileage now waits for **≥ ~5 mph for ~4 s** before counting, uses **lat/lon steps** between fixes, and stops after **≤ ~2 mph for ~45 s**. Tune via `/etc/default/enviro-gps-speed`:
+
+```bash
+MILEAGE_DRIVING_ENTER_MPH=5
+MILEAGE_DRIVING_ENTER_SEC=4
+MILEAGE_PARKED_MAX_MPH=2
+MILEAGE_PARKED_HOLD_SEC=45
+```
+
+**Fix a bad odometer:** edit `/var/lib/automotive_gps/odometer.json` (`odometer_miles` / `trip_miles`), then `systemctl restart enviro-gps-speed`, or run `redis-cli DEL automotive_gps:mileage` if Redis still has the inflated value.
 
 ## Personal records
 
@@ -62,8 +71,9 @@ Tracked when GPS fix is **A** (valid):
 
 | Record | Rule |
 |--------|------|
+| **1/8 mi** | Lowest time from **≥ 1 mph** until GPS path length reaches **0.125 mi** (drag-strip eighth) |
 | **0–60** | Lowest time from **≥ 1 mph** to **≥ 60 mph** |
 | **20–60** | Lowest time from **≥ 20 mph** to **≥ 60 mph** |
 | **Top speed** | Maximum mph seen |
 
-Stored in **`/var/lib/automotive_gps/records.json`** and Redis hash **`automotive_gps:records`**. At **0 mph**, the Enviro LCD shows all four lines (including odometer **MI**).
+Stored in **`/var/lib/automotive_gps/records.json`** and Redis hash **`automotive_gps:records`**. At **0 mph**, the Enviro LCD shows all five lines (including odometer **MI**). GPS distance is approximate vs a beam trip; best for comparing your own runs.

@@ -49,12 +49,25 @@ def main() -> None:
         action="store_true",
         help="Zero trip_miles (odometer unchanged)",
     )
+    parser.add_argument(
+        "--set-odometer",
+        type=float,
+        metavar="MI",
+        help="Set odometer_miles (e.g. after GPS drift); trip unchanged unless you reset it",
+    )
     args = parser.parse_args()
 
     if args.reset_trip:
         store = MileageStore(state_path=args.state_file)
         store.reset_trip()
         print("Trip miles reset.")
+        return
+
+    if args.set_odometer is not None:
+        store = MileageStore(state_path=args.state_file)
+        store.odometer_miles = max(0.0, args.set_odometer)
+        store.flush()
+        print(f"Odometer set to {store.odometer_miles:.2f} mi.")
         return
 
     mileage = load_snapshot(state_path=args.state_file)
@@ -67,6 +80,7 @@ def main() -> None:
     print(f"Device:    {mileage['device_id']}")
     print(f"Odometer:  {mileage['odometer_miles']:.2f} mi")
     print(f"Trip:      {mileage['trip_miles']:.2f} mi")
+    print(f"1/8 mi:    {fmt_sec(records.get('best_eighth_mile_sec'))}")
     print(f"0-60:      {fmt_sec(records.get('best_zero_sixty_sec'))}")
     print(f"20-60:     {fmt_sec(records.get('best_twenty_sixty_sec'))}")
     print(f"Top speed: {records.get('top_speed_mph', 0):.0f} mph")

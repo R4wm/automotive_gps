@@ -1,4 +1,4 @@
-"""Personal driving records: 0–60, 20–60, top speed (Redis + JSON)."""
+"""Personal driving records: 1/8 mi, 0–60, 20–60, top speed (Redis + JSON)."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from mileage import (  # same install dir on Pi
     DEFAULT_REDIS_URL,
     _utc_now,
     default_device_id,
+    haversine_miles,
     redis,
 )
 
@@ -22,6 +23,74 @@ REDIS_HASH_KEY = "records"
 RUN_END_MPH = 60.0
 RUN_START_MPH = 1.0
 RUN_20_MPH = 20.0
+EIGHTH_MILE_MI = 0.125
+EIGHTH_MIN_SEC = 4.0
+EIGHTH_MAX_SEC = 45.0
+EIGHTH_ABORT_MPH = 2.0
+EIGHTH_MAX_SEGMENT_MI = 0.08
+
+
+class EighthMileTracker:
+    """Time from launch to 1/8 mile (0.125 mi) using GPS position deltas."""
+
+    def __init__(self) -> None:
+        self._start: float | None = None
+        self._dist_mi = 0.0
+        self._last_pos: tuple[float, float] | None = None
+
+    def _reset(self) -> None:
+        self._start = None
+        self._dist_mi = 0.0
+        self._last_pos = None
+
+    def tick(
+        self,
+        mph: float,
+        now: float,
+        lat: float | None,
+        lon: float | None,
+    ) -> float | None:
+        if mph < 0.5:
+            self._reset()
+            return None
+
+        if lat is None or lon is None:
+            return None
+
+        if self._start is None:
+            if mph < RUN_START_MPH:
+                return None
+            self._start = now
+            self._last_pos = (lat, lon)
+            self._dist_mi = 0.0
+            return None
+
+        elapsed = now - self._start
+        if elapsed > EIGHTH_MAX_SEC:
+            self._reset()
+            return None
+
+        if mph < EIGHTH_ABORT_MPH and self._dist_mi < EIGHTH_MILE_MI * 0.5:
+            self._reset()
+            return None
+
+        if self._last_pos is not None:
+            delta = haversine_miles(self._last_pos[0], self._last_pos[1], lat, lon)
+            if delta > EIGHTH_MAX_SEGMENT_MI:
+                self._reset()
+                return None
+            self._dist_mi += delta
+        self._last_pos = (lat, lon)
+
+        if self._dist_mi < EIGHTH_MILE_MI:
+            return None
+
+        if elapsed < EIGHTH_MIN_SEC:
+            self._reset()
+            return None
+
+        self._reset()
+        return elapsed
 
 
 class AccelerationTracker:
@@ -81,6 +150,7 @@ class PersonalRecordsStore:
         )
         self.device_id = device_id or default_device_id()
 
+        self.best_eighth_mile_sec: float | None = None
         self.best_zero_sixty_sec: float | None = None
         self.best_twenty_sixty_sec: float | None = None
         self.top_speed_mph: float = 0.0
@@ -88,6 +158,7 @@ class PersonalRecordsStore:
         self._pending = False
         self._redis: Any = None
         self._tracker = AccelerationTracker()
+        self._eighth = EighthMileTracker()
 
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self._apply_record(self._read_file())
@@ -146,8 +217,15 @@ class PersonalRecordsStore:
         snap = self.snapshot()
         mapping = {
             "device_id": snap["device_id"],
-            "best_zero_sixty_sec": "" if snap["best_zero_sixty_sec"] is None else str(snap["best_zero_sixty_sec"]),
-            "best_twenty_sixty_sec": "" if snap["best_twenty_sixty_sec"] is None else str(snap["best_twenty_sixty_sec"]),
+            "best_eighth_mile_sec": ""
+            if snap["best_eighth_mile_sec"] is None
+            else str(snap["best_eighth_mile_sec"]),
+            "best_zero_sixty_sec": ""
+            if snap["best_zero_sixty_sec"] is None
+            else str(snap["best_zero_sixty_sec"]),
+            "best_twenty_sixty_sec": ""
+            if snap["best_twenty_sixty_sec"] is None
+            else str(snap["best_twenty_sixty_sec"]),
             "top_speed_mph": str(snap["top_speed_mph"]),
             "updated_at": snap["updated_at"],
         }
@@ -168,8 +246,11 @@ class PersonalRecordsStore:
     def _apply_record(self, data: dict[str, Any]) -> None:
         if not data:
             return
+        e = self._float(data.get("best_eighth_mile_sec"))
         z = self._float(data.get("best_zero_sixty_sec"))
         t = self._float(data.get("best_twenty_sixty_sec"))
+        if e is not None:
+            self.best_eighth_mile_sec = e
         if z is not None:
             self.best_zero_sixty_sec = z
         if t is not None:
@@ -183,8 +264,13 @@ class PersonalRecordsStore:
             self.device_id = str(data["device_id"])
 
     def _merge_record(self, data: dict[str, Any]) -> None:
+        e = self._float(data.get("best_eighth_mile_sec"))
         z = self._float(data.get("best_zero_sixty_sec"))
         t = self._float(data.get("best_twenty_sixty_sec"))
+        if e is not None and (
+            self.best_eighth_mile_sec is None or e < self.best_eighth_mile_sec
+        ):
+            self.best_eighth_mile_sec = e
         if z is not None and (
             self.best_zero_sixty_sec is None or z < self.best_zero_sixty_sec
         ):
@@ -200,6 +286,7 @@ class PersonalRecordsStore:
     def snapshot(self) -> dict[str, Any]:
         return {
             "device_id": self.device_id,
+            "best_eighth_mile_sec": self.best_eighth_mile_sec,
             "best_zero_sixty_sec": self.best_zero_sixty_sec,
             "best_twenty_sixty_sec": self.best_twenty_sixty_sec,
             "top_speed_mph": round(self.top_speed_mph, 2),
@@ -208,7 +295,11 @@ class PersonalRecordsStore:
 
     def note_run(self, kind: str, seconds: float) -> bool:
         improved = False
-        if kind == "0-60":
+        if kind == "1/8":
+            if self.best_eighth_mile_sec is None or seconds < self.best_eighth_mile_sec:
+                self.best_eighth_mile_sec = round(seconds, 3)
+                improved = True
+        elif kind == "0-60":
             if self.best_zero_sixty_sec is None or seconds < self.best_zero_sixty_sec:
                 self.best_zero_sixty_sec = round(seconds, 3)
                 improved = True
@@ -220,12 +311,23 @@ class PersonalRecordsStore:
             self._pending = True
         return improved
 
-    def tick_speed(self, mph: float, now: float, *, fix_ok: bool) -> None:
+    def tick_speed(
+        self,
+        mph: float,
+        now: float,
+        *,
+        fix_ok: bool,
+        lat: float | None = None,
+        lon: float | None = None,
+    ) -> None:
         if not fix_ok:
             return
         if mph > self.top_speed_mph:
             self.top_speed_mph = mph
             self._pending = True
+        eighth = self._eighth.tick(mph, now, lat, lon)
+        if eighth is not None:
+            self.note_run("1/8", eighth)
         for kind, elapsed in self._tracker.tick(mph, now):
             self.note_run(kind, elapsed)
 
