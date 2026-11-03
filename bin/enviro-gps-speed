@@ -53,22 +53,29 @@ MARGIN = 6
 BG = (0, 0, 0)
 FG = (255, 255, 255)
 NO_FIX_TEXT = "--"
+NO_GPS_TEXT = "--"
+GPS_STALE_SEC = 5.0
 
 
-def parse_rmc_speed_mph(line: str) -> float | None:
+def parse_rmc_line(line: str) -> tuple[bool, float | None]:
+    """Return (is_rmc, mph). mph is set for fix (A) or 0.0 for no-fix (V)."""
     line = line.strip()
     if len(line) < 10 or line[0] != "$":
-        return None
+        return False, None
     if not line.split(",", 1)[0].endswith("RMC"):
-        return None
+        return False, None
     parts = line.split(",")
-    if len(parts) < 8 or parts[2] != "A":
-        return None
+    if len(parts) < 8:
+        return True, 0.0
+    if parts[2] == "V":
+        return True, 0.0
+    if parts[2] != "A":
+        return True, None
     try:
         knots = float(parts[7])
     except ValueError:
-        return None
-    return max(0.0, knots * KNOTS_TO_MPH)
+        return True, 0.0
+    return True, max(0.0, knots * KNOTS_TO_MPH)
 
 
 def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -109,9 +116,9 @@ def draw_text_centered(
     draw.text((x, y), text, font=font, fill=fill)
 
 
-def format_speed(mph: float | None) -> str:
+def format_speed(mph: float | None, *, gps_live: bool) -> str:
     if mph is None:
-        return NO_FIX_TEXT
+        return NO_GPS_TEXT if not gps_live else "0"
     return str(int(round(mph)))
 
 
@@ -203,13 +210,20 @@ def load_idle_playlist(
     return clips
 
 
-def display_key(mph: float | None, idle_max_mph: float, idle_enabled: bool) -> str:
-    if mph is None:
-        return f"text:{NO_FIX_TEXT}"
-    shown = int(round(mph))
+def display_key(
+    mph: float | None,
+    idle_max_mph: float,
+    idle_enabled: bool,
+    *,
+    gps_live: bool,
+) -> str:
+    text = format_speed(mph, gps_live=gps_live)
+    if text == NO_GPS_TEXT:
+        return f"text:{NO_GPS_TEXT}"
+    shown = int(text)
     if idle_enabled and shown <= int(round(idle_max_mph)):
         return "idle"
-    return f"text:{shown}"
+    return f"text:{text}"
 
 
 def main() -> None:
@@ -279,6 +293,7 @@ def main() -> None:
 
     ser: serial.Serial | None = None
     last_mph: float | None = None
+    last_rmc_at = 0.0
     last_speed_draw = 0.0
     last_idle_anim = 0.0
     idle_clip_index = 0
@@ -362,7 +377,16 @@ def main() -> None:
         nonlocal ser, last_serial_open
         close_serial()
         try:
-            ser = serial.Serial(args.port, args.baud, timeout=0.15)
+            ser = serial.Serial(
+                args.port,
+                args.baud,
+                timeout=0.15,
+                rtscts=False,
+                dsrdtr=False,
+            )
+            ser.dtr = True
+            ser.rts = False
+            ser.reset_input_buffer()
         except (OSError, serial.SerialException):
             ser = None
         last_serial_open = time.monotonic()
@@ -387,26 +411,36 @@ def main() -> None:
                     raw = ser.readline()
                     if not raw:
                         break
-                    parsed = parse_rmc_speed_mph(
+                    is_rmc, parsed = parse_rmc_line(
                         raw.decode("ascii", errors="ignore")
                     )
-                    if parsed is not None:
-                        mph = parsed
+                    if is_rmc:
+                        last_rmc_at = now
+                        if parsed is not None:
+                            mph = parsed
             except serial.SerialException:
                 close_serial()
         elif now - last_serial_open >= SERIAL_REOPEN_SEC:
             open_serial()
         last_mph = mph
 
+        gps_live = (now - last_rmc_at) <= GPS_STALE_SEC
+        display_mph = mph if gps_live else None
+
         if mileage is not None:
-            mileage.tick(mph, now)
+            mileage.tick(display_mph if gps_live else None, now)
             if mileage.maybe_flush(now, last_mileage_flush):
                 last_mileage_flush = now
 
         if not args.no_idle_image:
             ensure_idle_clips()
         idle_enabled = not args.no_idle_image and bool(idle_clips)
-        key = display_key(mph, args.idle_max_mph, idle_enabled)
+        key = display_key(
+            display_mph,
+            args.idle_max_mph,
+            idle_enabled,
+            gps_live=gps_live,
+        )
 
         if key == "idle":
             if key != shown_key:
