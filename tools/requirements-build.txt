@@ -1,0 +1,5 @@
+# For tools/build_speedlimit_db.py (run on a PC; not needed on the Pi at runtime)
+pyrosm>=0.6.0
+geopandas>=0.14.0
+shapely>=2.0.0
+pyogrio>=0.7.0

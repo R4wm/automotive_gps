@@ -2,3 +2,6 @@
 __pycache__/
 .env
 *.local
+*.osm.pbf
+speedlimits*.db
+.venv-build/

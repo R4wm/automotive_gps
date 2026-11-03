@@ -28,6 +28,13 @@ if [[ -f "$ROOT/lib/records.py" ]]; then
   install -d /usr/local/lib/automotive_gps
   install -m 644 "$ROOT/lib/records.py" /usr/local/lib/automotive_gps/records.py
 fi
+if [[ -f "$ROOT/lib/speedlimit_db.py" ]]; then
+  install -d /usr/local/lib/automotive_gps
+  install -m 644 "$ROOT/lib/speedlimit_db.py" /usr/local/lib/automotive_gps/speedlimit_db.py
+fi
+if [[ -f "$ROOT/bin/speedlimit-lookup" ]]; then
+  install -m 755 "$ROOT/bin/speedlimit-lookup" /usr/local/bin/speedlimit-lookup
+fi
 install -d -m 755 /var/lib/automotive_gps
 if command -v redis-server >/dev/null 2>&1; then
   install -d -m 755 -o redis -g redis /var/log/redis 2>/dev/null || mkdir -p /var/log/redis

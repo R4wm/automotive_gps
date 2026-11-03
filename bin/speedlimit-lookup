@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""Test local OSM speed-limit DB lookup."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+_LIB = Path("/usr/local/lib/automotive_gps")
+if _LIB.is_dir():
+    sys.path.insert(0, str(_LIB))
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+
+from speedlimit_db import DEFAULT_DB_PATH, SpeedLimitDB  # noqa: E402
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Local speed limit lookup")
+    parser.add_argument("lat", type=float)
+    parser.add_argument("lon", type=float)
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    args = parser.parse_args()
+
+    db = SpeedLimitDB(args.db)
+    meta = db.meta()
+    mph, dist = db.lookup_mph(args.lat, args.lon)
+    if meta:
+        print(f"DB region: {meta.get('region', '?')} built {meta.get('built_at', '?')}")
+    if mph is None:
+        print("No speed limit found nearby (OSM may lack maxspeed here).")
+        return
+    print(f"Speed limit: {int(round(mph))} mph (~{dist:.0f} m from road centerline)")
+
+
+if __name__ == "__main__":
+    main()
