@@ -1,0 +1,4 @@
+# Idle art at 0–3 mph (one filename per line; paths relative to install dir)
+shyguy-with_sling.gif
+fat_shy-guy.gif
+jammin_shyguy.png

@@ -13,7 +13,7 @@ Raspberry Pi Zero W (DietPi) in-car display: USB GPS speed on a Pimoroni **Scrol
 
 | Component | Behavior |
 |-----------|----------|
-| **enviro-gps-speed** | **Enviro LCD:** large integer speed; **Shy Guy GIF at 0–3 mph** (`assets/fat_shy-guy.gif`), full backlight |
+| **enviro-gps-speed** | **Enviro LCD:** speed digits, or **rotating Shy Guy art at 0–3 mph** (`assets/idle-rotation.txt`), full backlight |
 | **scroll-hat-manager** | Scroll HAT: GPS speed; **button A** cycles GPS ↔ ESTHER scroll |
 | **gps-speed-hat** / **scroll-esther** | Standalone scripts (same logic as manager modes) |
 | **car-wifi** | `allow-hotplug wlan0`; WiFi comes up in background after boot; wpa_supplicant keeps scanning |
@@ -88,7 +88,7 @@ scroll-esther         # scroll only
 enviro-gps-speed        # Enviro LCD (same as systemd service)
 ```
 
-**Enviro idle image:** At **0–3 mph** (rounded), the LCD shows **`fat_shy-guy.gif`** (animated). Extra art lives in `assets/` and installs to `/usr/local/share/automotive_gps/`. Options: `--idle-max-mph 5`, `--idle-image /path/to.gif`, `--no-idle-image`.
+**Enviro idle art:** At **0–3 mph**, the LCD cycles **`idle-rotation.txt`**: `shyguy-with_sling.gif` → `fat_shy-guy.gif` → `jammin_shyguy.png` (loop). Edit that file in `assets/` and re-run `install.sh` to change order or add GIFs/PNGs. Single file only: `--idle-image /path/to.gif`. Options: `--idle-gif-speed 3`, `--no-idle-image`.
 
 ## Repository layout
 

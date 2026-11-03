@@ -7,6 +7,7 @@ import argparse
 import signal
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import ST7735 as st7735
@@ -16,12 +17,28 @@ from PIL import Image, ImageDraw, ImageFont
 KNOTS_TO_MPH = 1.15078
 DEFAULT_PORT = "/dev/ttyUSB0"
 DEFAULT_BAUD = 4800
-DEFAULT_IDLE_IMAGE = Path("/usr/local/share/automotive_gps/fat_shy-guy.gif")
+DEFAULT_IDLE_DIR = Path("/usr/local/share/automotive_gps")
+DEFAULT_IDLE_MANIFEST = "idle-rotation.txt"
 DEFAULT_IDLE_MAX_MPH = 3.0
 SPI_SPEED_HZ = 10_000_000  # Pimoroni Enviro examples; faster full-frame updates
 DEFAULT_IDLE_GIF_SPEED = 2.5  # multiply GIF frame rate (1 = file timing)
+IDLE_STATIC_HOLD_SEC = 2.5  # how long PNG / still frames stay up
 LOOP_SLEEP_IDLE = 0.008
 LOOP_SLEEP_NORMAL = 0.025
+
+# Fallback if manifest missing (best fit for 160×80: sling GIF first)
+DEFAULT_IDLE_ROTATION = (
+    "shyguy-with_sling.gif",
+    "fat_shy-guy.gif",
+    "jammin_shyguy.png",
+)
+
+
+@dataclass
+class IdleClip:
+    name: str
+    frames: list[Image.Image]
+    durations: list[float]
 
 # Display (160x80 landscape after rotation=270)
 MARGIN = 6
@@ -111,15 +128,15 @@ def compose_idle_frame(source: Image.Image, width: int, height: int) -> Image.Im
     return canvas
 
 
-def load_idle_frames(
+def load_idle_clip(
     path: Path, width: int, height: int, gif_speed: float
-) -> tuple[list[Image.Image], list[float]]:
+) -> IdleClip | None:
     if not path.is_file():
-        return [], []
+        return None
     try:
         source = Image.open(path)
     except OSError:
-        return [], []
+        return None
 
     frames: list[Image.Image] = []
     durations: list[float] = []
@@ -138,10 +155,44 @@ def load_idle_frames(
         index += 1
 
     if not frames:
-        return [], []
-    if len(durations) < len(frames):
+        return None
+    if len(frames) == 1:
+        durations = [max(IDLE_STATIC_HOLD_SEC, 0.5)]
+    elif len(durations) < len(frames):
         durations.extend([0.1] * (len(frames) - len(durations)))
-    return frames, durations
+    return IdleClip(name=path.name, frames=frames, durations=durations)
+
+
+def read_idle_manifest(idle_dir: Path) -> list[str]:
+    manifest = idle_dir / DEFAULT_IDLE_MANIFEST
+    names: list[str] = []
+    if manifest.is_file():
+        for line in manifest.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                names.append(line)
+    if names:
+        return names
+    return list(DEFAULT_IDLE_ROTATION)
+
+
+def load_idle_playlist(
+    idle_dir: Path,
+    width: int,
+    height: int,
+    gif_speed: float,
+    single: Path | None,
+) -> list[IdleClip]:
+    if single is not None:
+        clip = load_idle_clip(single, width, height, gif_speed)
+        return [clip] if clip else []
+
+    clips: list[IdleClip] = []
+    for name in read_idle_manifest(idle_dir):
+        clip = load_idle_clip(idle_dir / name, width, height, gif_speed)
+        if clip is not None:
+            clips.append(clip)
+    return clips
 
 
 def display_key(mph: float | None, idle_max_mph: float, idle_enabled: bool) -> str:
@@ -161,9 +212,15 @@ def main() -> None:
         "--idle-image",
         "--idle-png",
         type=Path,
-        default=DEFAULT_IDLE_IMAGE,
+        default=None,
         dest="idle_image",
-        help="Image shown at 0–idle-max mph (PNG/GIF; default: fat_shy-guy.gif)",
+        help="Single idle PNG/GIF only (disables rotation playlist)",
+    )
+    parser.add_argument(
+        "--idle-dir",
+        type=Path,
+        default=DEFAULT_IDLE_DIR,
+        help="Directory for idle-rotation.txt and assets (default: share dir)",
     )
     parser.add_argument(
         "--idle-max-mph",
@@ -197,14 +254,15 @@ def main() -> None:
     disp.begin()
     disp.set_backlight(1)
 
-    idle_frames: list[Image.Image] = []
-    idle_durations: list[float] = []
+    idle_clips: list[IdleClip] = []
+    gif_speed = max(args.idle_gif_speed, 0.1)
     if not args.no_idle_image:
-        idle_frames, idle_durations = load_idle_frames(
-            args.idle_image,
+        idle_clips = load_idle_playlist(
+            args.idle_dir,
             disp.width,
             disp.height,
-            max(args.idle_gif_speed, 0.1),
+            gif_speed,
+            args.idle_image,
         )
 
     img = Image.new("RGB", (disp.width, disp.height), BG)
@@ -214,6 +272,7 @@ def main() -> None:
     last_mph: float | None = None
     last_speed_draw = 0.0
     last_idle_anim = 0.0
+    idle_clip_index = 0
     idle_frame_index = 0
     shown_key = ""
     last_serial_open = 0.0
@@ -227,11 +286,34 @@ def main() -> None:
         draw_text_centered(draw, text, font, disp.width, disp.height, FG)
         disp.display(img)
 
-    def paint_idle_frame(index: int) -> None:
-        if not idle_frames:
+    def paint_idle_at(clip_index: int, frame_index: int) -> None:
+        if not idle_clips:
             paint_speed_text("0")
             return
-        disp.display(idle_frames[index % len(idle_frames)])
+        clip = idle_clips[clip_index % len(idle_clips)]
+        disp.display(clip.frames[frame_index % len(clip.frames)])
+
+    def reset_idle_playback() -> None:
+        nonlocal idle_clip_index, idle_frame_index, last_idle_anim
+        idle_clip_index = 0
+        idle_frame_index = 0
+        last_idle_anim = time.monotonic()
+        paint_idle_at(0, 0)
+
+    def tick_idle_animation(now: float) -> None:
+        nonlocal idle_clip_index, idle_frame_index, last_idle_anim
+        if not idle_clips:
+            return
+        clip = idle_clips[idle_clip_index]
+        step = clip.durations[idle_frame_index]
+        if now - last_idle_anim < step:
+            return
+        last_idle_anim = now
+        idle_frame_index += 1
+        if idle_frame_index >= len(clip.frames):
+            idle_clip_index = (idle_clip_index + 1) % len(idle_clips)
+            idle_frame_index = 0
+        paint_idle_at(idle_clip_index, idle_frame_index)
 
     def stop(_signum=None, _frame=None) -> None:
         disp.set_backlight(0)
@@ -284,21 +366,15 @@ def main() -> None:
             open_serial()
         last_mph = mph
 
-        idle_enabled = not args.no_idle_image and bool(idle_frames)
+        idle_enabled = not args.no_idle_image and bool(idle_clips)
         key = display_key(mph, args.idle_max_mph, idle_enabled)
 
         if key == "idle":
             if key != shown_key:
-                idle_frame_index = 0
-                last_idle_anim = now
-                paint_idle_frame(0)
+                reset_idle_playback()
                 shown_key = key
-            elif len(idle_frames) > 1:
-                step = idle_durations[idle_frame_index]
-                if now - last_idle_anim >= step:
-                    idle_frame_index = (idle_frame_index + 1) % len(idle_frames)
-                    last_idle_anim = now
-                    paint_idle_frame(idle_frame_index)
+            else:
+                tick_idle_animation(now)
         else:
             refresh_due = (
                 key != shown_key
@@ -310,7 +386,7 @@ def main() -> None:
                 shown_key = key
                 last_speed_draw = now
 
-        if key == "idle" and len(idle_frames) > 1:
+        if key == "idle" and idle_clips:
             time.sleep(LOOP_SLEEP_IDLE)
         else:
             time.sleep(LOOP_SLEEP_NORMAL)
