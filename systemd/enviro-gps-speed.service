@@ -1,5 +1,5 @@
 [Unit]
-Description=Enviro LCD GPS speed with auto brightness
+Description=Enviro LCD GPS speed
 After=multi-user.target
 StartLimitIntervalSec=0
 
@@ -8,7 +8,7 @@ Type=simple
 ExecStart=/usr/local/bin/enviro-gps-speed
 Restart=always
 RestartSec=5
-SupplementaryGroups=dialout i2c gpio
+SupplementaryGroups=dialout
 
 [Install]
 WantedBy=multi-user.target

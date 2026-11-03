@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Large GPS speed on Enviro/Enviro+ LCD; LTR559 auto-brightness."""
+"""Large GPS speed on Enviro/Enviro+ LCD (full backlight)."""
 
 from __future__ import annotations
 
@@ -8,12 +8,9 @@ import signal
 import sys
 import time
 
-import RPi.GPIO as GPIO
 import ST7735 as st7735
 import serial
 from PIL import Image, ImageDraw, ImageFont
-from smbus2 import SMBus
-from ltr559 import LTR559
 
 KNOTS_TO_MPH = 1.15078
 DEFAULT_PORT = "/dev/ttyUSB0"
@@ -24,13 +21,6 @@ MARGIN = 6
 BG = (0, 0, 0)
 FG = (255, 255, 255)
 NO_FIX_TEXT = "--"
-
-# Backlight: smoothed 0–100
-BRIGHTNESS_MIN = 10.0
-BRIGHTNESS_MAX = 100.0
-LUX_SMOOTH = 0.82  # higher = slower brightness changes
-BACKLIGHT_PIN = 12
-BACKLIGHT_PWM_HZ = 1000
 
 
 def parse_rmc_speed_mph(line: str) -> float | None:
@@ -95,19 +85,6 @@ def draw_text_centered(
     )
 
 
-def lux_to_backlight(lux: float) -> float:
-    """Map ambient lux to backlight percent (tuned for in-car use)."""
-    if lux < 0.01:
-        return BRIGHTNESS_MIN
-    if lux < 2:
-        return 15.0
-    if lux < 15:
-        return 15.0 + (lux - 2) * 2.5  # ~15–47
-    if lux < 120:
-        return 47.0 + (lux - 15) * 0.45  # ~47–94
-    return BRIGHTNESS_MAX
-
-
 def format_speed(mph: float | None) -> str:
     if mph is None:
         return NO_FIX_TEXT
@@ -118,7 +95,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Enviro LCD GPS speed")
     parser.add_argument("--port", default=DEFAULT_PORT)
     parser.add_argument("--baud", type=int, default=DEFAULT_BAUD)
-    parser.add_argument("--no-auto-brightness", action="store_true")
     args = parser.parse_args()
 
     disp = st7735.ST7735(
@@ -131,14 +107,7 @@ def main() -> None:
         invert=False,  # True swaps black/white on the Enviro LCD
     )
     disp.begin()
-    # ST7735 0.0.5: set_backlight is GPIO on/off only; use PWM for levels.
     disp.set_backlight(1)
-    GPIO.setmode(GPIO.BCM)
-    backlight_pwm = GPIO.PWM(BACKLIGHT_PIN, BACKLIGHT_PWM_HZ)
-    backlight_pwm.start(int(BRIGHTNESS_MAX))
-
-    bus = SMBus(1)
-    ltr = LTR559(i2c_dev=bus)
 
     img = Image.new("RGB", (disp.width, disp.height), BG)
     draw = ImageDraw.Draw(img)
@@ -155,24 +124,13 @@ def main() -> None:
     last_mph: float | None = None
     last_speed_draw = 0.0
     shown_text = ""
-    backlight = BRIGHTNESS_MAX
-    last_lux_sample = 0.0
     last_serial_open = 0.0
     SERIAL_REOPEN_SEC = 2.0
 
-    def apply_backlight(percent: float) -> None:
-        duty = int(max(0, min(100, round(percent))))
-        backlight_pwm.ChangeDutyCycle(duty)
-
     def stop(_signum=None, _frame=None) -> None:
-        try:
-            backlight_pwm.stop()
-        except RuntimeError:
-            pass
-        GPIO.output(BACKLIGHT_PIN, GPIO.LOW)
+        disp.set_backlight(0)
         if ser is not None:
             ser.close()
-        bus.close()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, stop)
@@ -231,15 +189,6 @@ def main() -> None:
             paint_speed(text)
             shown_text = text
             last_speed_draw = now
-
-        if not args.no_auto_brightness and now - last_lux_sample >= 0.4:
-            last_lux_sample = now
-            try:
-                target = lux_to_backlight(ltr.get_lux())
-            except OSError:
-                target = backlight
-            backlight = LUX_SMOOTH * backlight + (1.0 - LUX_SMOOTH) * target
-            apply_backlight(backlight)
 
         time.sleep(0.08)
 

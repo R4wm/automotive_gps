@@ -13,7 +13,7 @@ Raspberry Pi Zero W (DietPi) in-car display: USB GPS speed on a Pimoroni **Scrol
 
 | Component | Behavior |
 |-----------|----------|
-| **enviro-gps-speed** | **Enviro LCD:** large integer speed; **LTR559** auto-dims backlight (system service) |
+| **enviro-gps-speed** | **Enviro LCD:** large integer speed, full backlight (system service) |
 | **scroll-hat-manager** | Scroll HAT: GPS speed; **button A** cycles GPS ↔ ESTHER scroll |
 | **gps-speed-hat** / **scroll-esther** | Standalone scripts (same logic as manager modes) |
 | **car-wifi** | `allow-hotplug wlan0`; WiFi comes up in background after boot; wpa_supplicant keeps scanning |
