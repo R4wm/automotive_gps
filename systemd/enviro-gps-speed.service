@@ -1,7 +1,6 @@
 [Unit]
 Description=Enviro LCD GPS speed
-After=multi-user.target redis-server.service
-Wants=redis-server.service
+After=multi-user.target
 StartLimitIntervalSec=0
 
 [Service]

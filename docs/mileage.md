@@ -18,8 +18,11 @@ On startup, the service merges file and Redis and keeps the **higher odometer** 
 
 ```bash
 apt install redis-server python3-redis
+mkdir -p /var/log/redis && chown redis:redis /var/log/redis
 systemctl enable --now redis-server
 ```
+
+If Redis fails with “Can't open the log file”, create `/var/log/redis` as above.
 
 Configure `/etc/default/enviro-gps-speed` (see `config/enviro-gps-speed.default`). Remote Redis:
 

@@ -25,6 +25,9 @@ if [[ -f "$ROOT/lib/mileage.py" ]]; then
   install -m 644 "$ROOT/lib/mileage.py" /usr/local/lib/automotive_gps/mileage.py
 fi
 install -d -m 755 /var/lib/automotive_gps
+if command -v redis-server >/dev/null 2>&1; then
+  install -d -m 755 -o redis -g redis /var/log/redis 2>/dev/null || mkdir -p /var/log/redis
+fi
 if [[ -f "$ROOT/config/enviro-gps-speed.default" ]]; then
   install -d /etc/default
   if [[ ! -f /etc/default/enviro-gps-speed ]]; then
