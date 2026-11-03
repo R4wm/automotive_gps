@@ -1,0 +1,10 @@
+# Enviro GPS speed service (optional mileage + Redis)
+# Copy to /etc/default/enviro-gps-speed
+
+# Redis (local on Pi, or your home server)
+REDIS_URL=redis://127.0.0.1:6379/0
+MILEAGE_KEY_PREFIX=automotive_gps
+# MILEAGE_DEVICE_ID=dietpi-car
+
+# Set to 1 to disable mileage tracking
+# MILEAGE_DISABLE=0

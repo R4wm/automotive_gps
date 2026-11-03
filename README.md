@@ -13,7 +13,7 @@ Raspberry Pi Zero W (DietPi) in-car display: USB GPS speed on a Pimoroni **Scrol
 
 | Component | Behavior |
 |-----------|----------|
-| **enviro-gps-speed** | **Enviro LCD:** speed digits, or **rotating Shy Guy art at 0–3 mph** (`assets/idle-rotation.txt`), full backlight |
+| **enviro-gps-speed** | **Enviro LCD:** speed / idle art; **mileage → Redis + JSON** ([docs/mileage.md](docs/mileage.md)) |
 | **scroll-hat-manager** | Scroll HAT: GPS speed; **button A** cycles GPS ↔ ESTHER scroll |
 | **gps-speed-hat** / **scroll-esther** | Standalone scripts (same logic as manager modes) |
 | **car-wifi** | `allow-hotplug wlan0`; WiFi comes up in background after boot; wpa_supplicant keeps scanning |
@@ -86,7 +86,10 @@ scroll-hat-manager    # production (systemd)
 gps-speed-hat         # speed only
 scroll-esther         # scroll only
 enviro-gps-speed        # Enviro LCD (same as systemd service)
+automotive-gps-miles    # odometer / trip (Redis + /var/lib/automotive_gps/odometer.json)
 ```
+
+Mileage: `apt install redis-server python3-redis` and see [docs/mileage.md](docs/mileage.md).
 
 **Enviro idle art:** At **0–3 mph**, the LCD cycles **`idle-rotation.txt`**: `shyguy-with_sling.gif` → `fat_shy-guy.gif` → `jammin_shyguy.png` (loop). Edit that file in `assets/` and re-run `install.sh` to change order or add GIFs/PNGs. Single file only: `--idle-image /path/to.gif`. Options: `--idle-gif-speed 3`, `--no-idle-image`.
 
@@ -94,6 +97,8 @@ enviro-gps-speed        # Enviro LCD (same as systemd service)
 
 ```text
 bin/                  Programs installed to /usr/local/bin
+lib/                  Shared Python (mileage store)
+assets/               Idle LCD art + idle-rotation.txt
 systemd/              Unit files and drop-ins
 config/               Example network snippets (no secrets)
 install.sh            Deploy to a live system

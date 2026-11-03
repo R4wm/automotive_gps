@@ -1,9 +1,11 @@
 [Unit]
 Description=Enviro LCD GPS speed
-After=multi-user.target
+After=multi-user.target redis-server.service
+Wants=redis-server.service
 StartLimitIntervalSec=0
 
 [Service]
+EnvironmentFile=-/etc/default/enviro-gps-speed
 Type=simple
 ExecStart=/usr/local/bin/enviro-gps-speed
 Restart=always

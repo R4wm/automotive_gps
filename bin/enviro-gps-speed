@@ -14,6 +14,14 @@ import ST7735 as st7735
 import serial
 from PIL import Image, ImageDraw, ImageFont
 
+_MILEAGE_LIB = Path("/usr/local/lib/automotive_gps")
+if _MILEAGE_LIB.is_dir():
+    sys.path.insert(0, str(_MILEAGE_LIB))
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+
+from mileage import MileageStore  # noqa: E402
+
 KNOTS_TO_MPH = 1.15078
 DEFAULT_PORT = "/dev/ttyUSB0"
 DEFAULT_BAUD = 4800
@@ -241,6 +249,11 @@ def main() -> None:
         default=DEFAULT_IDLE_GIF_SPEED,
         help="Idle GIF speed multiplier (default: 2.5)",
     )
+    parser.add_argument(
+        "--no-mileage",
+        action="store_true",
+        help="Do not record distance to Redis/JSON",
+    )
     args = parser.parse_args()
 
     disp = st7735.ST7735(
@@ -267,6 +280,9 @@ def main() -> None:
 
     img = Image.new("RGB", (disp.width, disp.height), BG)
     draw = ImageDraw.Draw(img)
+
+    mileage: MileageStore | None = None
+    last_mileage_flush = time.monotonic()
 
     ser: serial.Serial | None = None
     last_mph: float | None = None
@@ -319,6 +335,8 @@ def main() -> None:
         disp.set_backlight(0)
         if ser is not None:
             ser.close()
+        if mileage is not None:
+            mileage.flush()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, stop)
@@ -344,6 +362,12 @@ def main() -> None:
         last_serial_open = time.monotonic()
         return ser is not None
 
+    if not args.no_mileage:
+        try:
+            mileage = MileageStore()
+        except OSError:
+            mileage = None
+
     open_serial()
 
     while True:
@@ -365,6 +389,11 @@ def main() -> None:
         elif now - last_serial_open >= SERIAL_REOPEN_SEC:
             open_serial()
         last_mph = mph
+
+        if mileage is not None:
+            mileage.tick(mph, now)
+            if mileage.maybe_flush(now, last_mileage_flush):
+                last_mileage_flush = now
 
         idle_enabled = not args.no_idle_image and bool(idle_clips)
         key = display_key(mph, args.idle_max_mph, idle_enabled)

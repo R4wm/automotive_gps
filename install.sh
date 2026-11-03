@@ -17,6 +17,20 @@ install -m 755 "$ROOT/bin/car-wifi-add-phone-hotspot" /usr/local/bin/car-wifi-ad
 if [[ -f "$ROOT/bin/enviro-gps-speed" ]]; then
   install -m 755 "$ROOT/bin/enviro-gps-speed" /usr/local/bin/enviro-gps-speed
 fi
+if [[ -f "$ROOT/bin/automotive-gps-miles" ]]; then
+  install -m 755 "$ROOT/bin/automotive-gps-miles" /usr/local/bin/automotive-gps-miles
+fi
+if [[ -f "$ROOT/lib/mileage.py" ]]; then
+  install -d /usr/local/lib/automotive_gps
+  install -m 644 "$ROOT/lib/mileage.py" /usr/local/lib/automotive_gps/mileage.py
+fi
+install -d -m 755 /var/lib/automotive_gps
+if [[ -f "$ROOT/config/enviro-gps-speed.default" ]]; then
+  install -d /etc/default
+  if [[ ! -f /etc/default/enviro-gps-speed ]]; then
+    install -m 644 "$ROOT/config/enviro-gps-speed.default" /etc/default/enviro-gps-speed
+  fi
+fi
 if [[ -d "$ROOT/assets" ]]; then
   install -d /usr/local/share/automotive_gps
   for asset in "$ROOT/assets"/*; do
