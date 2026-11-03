@@ -46,9 +46,7 @@ def parse_rmc_speed_mph(line: str) -> float | None:
 def format_speed(mph: float | None) -> str:
     if mph is None:
         return "NO FIX"
-    if mph < 10:
-        return f"{mph:.1f}MPH"
-    return f"{mph:.0f} MPH"
+    return str(int(round(mph)))
 
 
 def render_text(text: str) -> None:
