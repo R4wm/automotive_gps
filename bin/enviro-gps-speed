@@ -104,7 +104,6 @@ def main() -> None:
         backlight=12,
         rotation=270,
         spi_speed_hz=6000000,
-        invert=False,  # True swaps black/white on the Enviro LCD
     )
     disp.begin()
     disp.set_backlight(1)
