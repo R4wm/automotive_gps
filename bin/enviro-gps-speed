@@ -16,7 +16,7 @@ from PIL import Image, ImageDraw, ImageFont
 KNOTS_TO_MPH = 1.15078
 DEFAULT_PORT = "/dev/ttyUSB0"
 DEFAULT_BAUD = 4800
-DEFAULT_IDLE_PNG = Path("/usr/local/share/automotive_gps/idle.png")
+DEFAULT_IDLE_IMAGE = Path("/usr/local/share/automotive_gps/fat_shy-guy.gif")
 DEFAULT_IDLE_MAX_MPH = 3.0
 
 # Display (160x80 landscape after rotation=270)
@@ -86,21 +86,55 @@ def format_speed(mph: float | None) -> str:
     return str(int(round(mph)))
 
 
-def prepare_idle_frame(path: Path, width: int, height: int) -> Image.Image | None:
-    if not path.is_file():
-        return None
-    try:
-        source = Image.open(path).convert("RGB")
-    except OSError:
-        return None
+def compose_idle_frame(source: Image.Image, width: int, height: int) -> Image.Image:
     max_w = width - 2 * MARGIN
     max_h = height - 2 * MARGIN
-    source.thumbnail((max_w, max_h), Image.Resampling.LANCZOS)
-    frame = Image.new("RGB", (width, height), BG)
-    x = (width - source.width) // 2
-    y = (height - source.height) // 2
-    frame.paste(source, (x, y))
-    return frame
+    frame = source.copy()
+    if frame.mode in ("RGBA", "LA") or (
+        frame.mode == "P" and "transparency" in frame.info
+    ):
+        frame = frame.convert("RGBA")
+        flat = Image.new("RGB", frame.size, BG)
+        flat.paste(frame, mask=frame.split()[3])
+        frame = flat
+    else:
+        frame = frame.convert("RGB")
+    frame.thumbnail((max_w, max_h), Image.Resampling.LANCZOS)
+    canvas = Image.new("RGB", (width, height), BG)
+    x = (width - frame.width) // 2
+    y = (height - frame.height) // 2
+    canvas.paste(frame, (x, y))
+    return canvas
+
+
+def load_idle_frames(
+    path: Path, width: int, height: int
+) -> tuple[list[Image.Image], list[float]]:
+    if not path.is_file():
+        return [], []
+    try:
+        source = Image.open(path)
+    except OSError:
+        return [], []
+
+    frames: list[Image.Image] = []
+    durations: list[float] = []
+    index = 0
+    while True:
+        try:
+            source.seek(index)
+        except EOFError:
+            break
+        frames.append(compose_idle_frame(source, width, height))
+        ms = source.info.get("duration")
+        durations.append(max((ms or 100) / 1000.0, 0.05))
+        index += 1
+
+    if not frames:
+        return [], []
+    if len(durations) < len(frames):
+        durations.extend([0.1] * (len(frames) - len(durations)))
+    return frames, durations
 
 
 def display_key(mph: float | None, idle_max_mph: float, idle_enabled: bool) -> str:
@@ -108,7 +142,7 @@ def display_key(mph: float | None, idle_max_mph: float, idle_enabled: bool) -> s
         return f"text:{NO_FIX_TEXT}"
     shown = int(round(mph))
     if idle_enabled and shown <= int(round(idle_max_mph)):
-        return "png"
+        return "idle"
     return f"text:{shown}"
 
 
@@ -117,21 +151,25 @@ def main() -> None:
     parser.add_argument("--port", default=DEFAULT_PORT)
     parser.add_argument("--baud", type=int, default=DEFAULT_BAUD)
     parser.add_argument(
+        "--idle-image",
         "--idle-png",
         type=Path,
-        default=DEFAULT_IDLE_PNG,
-        help="PNG shown when speed is 0–idle-max mph (default: installed idle.png)",
+        default=DEFAULT_IDLE_IMAGE,
+        dest="idle_image",
+        help="Image shown at 0–idle-max mph (PNG/GIF; default: fat_shy-guy.gif)",
     )
     parser.add_argument(
         "--idle-max-mph",
         type=float,
         default=DEFAULT_IDLE_MAX_MPH,
-        help="Show idle PNG when rounded MPH is at or below this (default: 3)",
+        help="Show idle image when rounded MPH is at or below this (default: 3)",
     )
     parser.add_argument(
+        "--no-idle-image",
         "--no-idle-png",
         action="store_true",
-        help="Always show numeric speed; ignore idle PNG",
+        dest="no_idle_image",
+        help="Always show numeric speed",
     )
     args = parser.parse_args()
 
@@ -146,9 +184,12 @@ def main() -> None:
     disp.begin()
     disp.set_backlight(1)
 
-    idle_frame: Image.Image | None = None
-    if not args.no_idle_png:
-        idle_frame = prepare_idle_frame(args.idle_png, disp.width, disp.height)
+    idle_frames: list[Image.Image] = []
+    idle_durations: list[float] = []
+    if not args.no_idle_image:
+        idle_frames, idle_durations = load_idle_frames(
+            args.idle_image, disp.width, disp.height
+        )
 
     img = Image.new("RGB", (disp.width, disp.height), BG)
     draw = ImageDraw.Draw(img)
@@ -156,6 +197,8 @@ def main() -> None:
     ser: serial.Serial | None = None
     last_mph: float | None = None
     last_speed_draw = 0.0
+    last_idle_anim = 0.0
+    idle_frame_index = 0
     shown_key = ""
     last_serial_open = 0.0
     SERIAL_REOPEN_SEC = 2.0
@@ -168,11 +211,11 @@ def main() -> None:
         draw_text_centered(draw, text, font, disp.width, disp.height, FG)
         disp.display(img)
 
-    def paint_idle_png() -> None:
-        if idle_frame is None:
+    def paint_idle_frame(index: int) -> None:
+        if not idle_frames:
             paint_speed_text("0")
             return
-        disp.display(idle_frame)
+        disp.display(idle_frames[index % len(idle_frames)])
 
     def stop(_signum=None, _frame=None) -> None:
         disp.set_backlight(0)
@@ -225,22 +268,31 @@ def main() -> None:
             open_serial()
         last_mph = mph
 
-        idle_enabled = not args.no_idle_png and idle_frame is not None
+        idle_enabled = not args.no_idle_image and bool(idle_frames)
         key = display_key(mph, args.idle_max_mph, idle_enabled)
 
-        refresh_due = (
-            key != shown_key
-            or now - last_speed_draw > 1.0
-            and shown_key == f"text:{NO_FIX_TEXT}"
-        )
-
-        if refresh_due:
-            if key == "png":
-                paint_idle_png()
-            else:
+        if key == "idle":
+            if key != shown_key:
+                idle_frame_index = 0
+                last_idle_anim = now
+                paint_idle_frame(0)
+                shown_key = key
+            elif len(idle_frames) > 1:
+                step = idle_durations[idle_frame_index]
+                if now - last_idle_anim >= step:
+                    idle_frame_index = (idle_frame_index + 1) % len(idle_frames)
+                    last_idle_anim = now
+                    paint_idle_frame(idle_frame_index)
+        else:
+            refresh_due = (
+                key != shown_key
+                or now - last_speed_draw > 1.0
+                and shown_key == f"text:{NO_FIX_TEXT}"
+            )
+            if refresh_due:
                 paint_speed_text(key.removeprefix("text:"))
-            shown_key = key
-            last_speed_draw = now
+                shown_key = key
+                last_speed_draw = now
 
         time.sleep(0.08)
 

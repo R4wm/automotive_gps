@@ -17,9 +17,12 @@ install -m 755 "$ROOT/bin/car-wifi-add-phone-hotspot" /usr/local/bin/car-wifi-ad
 if [[ -f "$ROOT/bin/enviro-gps-speed" ]]; then
   install -m 755 "$ROOT/bin/enviro-gps-speed" /usr/local/bin/enviro-gps-speed
 fi
-if [[ -f "$ROOT/assets/idle.png" ]]; then
+if [[ -d "$ROOT/assets" ]]; then
   install -d /usr/local/share/automotive_gps
-  install -m 644 "$ROOT/assets/idle.png" /usr/local/share/automotive_gps/idle.png
+  for asset in "$ROOT/assets"/*; do
+    [[ -f "$asset" ]] || continue
+    install -m 644 "$asset" "/usr/local/share/automotive_gps/$(basename "$asset")"
+  done
 fi
 
 install -m 644 "$ROOT/systemd/scroll-hat-manager.service" /etc/systemd/system/scroll-hat-manager.service
