@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Scroll \"ESTHER\" on Pimoroni Scroll HAT Mini."""
+
+import signal
+import sys
+import time
+
+import scrollphathd as sphd
+from scrollphathd.fonts import font5x7
+
+TEXT = "ESTHER"
+FPS = 15
+BRIGHTNESS = 0.6
+GAP = 8  # pixels between end of text and restart
+
+
+def main() -> None:
+    sphd.setup()
+    sphd.set_clear_on_exit(True)
+    sphd.set_font(font5x7)
+
+    def _stop(_signum, _frame):
+        sphd.clear()
+        sphd.show()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
+
+    text_width = sphd.calculate_string_width(TEXT, font5x7, 1, False)
+    total = 17 + text_width + GAP
+
+    while True:
+        sphd.clear()
+        sphd.write_string(TEXT, x=17, y=0, brightness=BRIGHTNESS)
+        for offset in range(total):
+            sphd.scroll_to(offset, 0)
+            sphd.show()
+            time.sleep(1 / FPS)
+
+
+if __name__ == "__main__":
+    main()

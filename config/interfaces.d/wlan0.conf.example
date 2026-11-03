@@ -1,0 +1,7 @@
+# Example: /etc/network/interfaces.d/wlan0.conf
+# car-wifi: wlan0 brought up after boot by car-wifi.service
+allow-hotplug wlan0
+iface wlan0 inet dhcp
+pre-up iw dev wlan0 set power_save off || true
+post-down iw dev wlan0 set power_save on || true
+wpa-conf /etc/wpa_supplicant/wpa_supplicant.conf

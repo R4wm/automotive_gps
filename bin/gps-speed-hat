@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""Show GPS speed (MPH) on Pimoroni Scroll HAT Mini."""
+
+from __future__ import annotations
+
+import argparse
+import signal
+import sys
+import time
+
+import scrollphathd as sphd
+import serial
+from scrollphathd.fonts import font5x7
+
+KNOTS_TO_MPH = 1.15078
+DEFAULT_PORT = "/dev/ttyUSB0"
+DEFAULT_BAUD = 4800
+BRIGHTNESS = 0.75
+
+
+def parse_rmc_speed_mph(line: str) -> float | None:
+    line = line.strip()
+    if len(line) < 10 or line[0] != "$":
+        return None
+    head = line.split(",", 1)[0]
+    if not head.endswith("RMC"):
+        return None
+    parts = line.split(",")
+    if len(parts) < 8 or parts[2] != "A":
+        return None
+    try:
+        knots = float(parts[7])
+    except ValueError:
+        return None
+    return max(0.0, knots * KNOTS_TO_MPH)
+
+
+def format_speed(mph: float | None) -> str:
+    if mph is None:
+        return "NO FIX"
+    if mph < 10:
+        return f"{mph:.1f}MPH"
+    return f"{mph:.0f} MPH"
+
+
+def render(text: str) -> None:
+    sphd.clear()
+    width = sphd.calculate_string_width(text, font5x7, 0, False)
+    x = max(0, (sphd.DISPLAY_WIDTH - width) // 2)
+    sphd.write_string(text, x=x, y=0, letter_spacing=0, brightness=BRIGHTNESS)
+    sphd.scroll_to(0, 0)
+    sphd.show()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="GPS speed on Scroll HAT Mini")
+    parser.add_argument("--port", default=DEFAULT_PORT)
+    parser.add_argument("--baud", type=int, default=DEFAULT_BAUD)
+    args = parser.parse_args()
+
+    sphd.setup()
+    sphd.set_clear_on_exit(True)
+    sphd.set_font(font5x7)
+
+    def _stop(_signum, _frame) -> None:
+        sphd.clear()
+        sphd.show()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
+
+    render("GPS...")
+
+    with serial.Serial(args.port, args.baud, timeout=1) as ser:
+        last_mph: float | None = None
+        last_draw = 0.0
+        while True:
+            raw = ser.readline()
+            if not raw:
+                if time.monotonic() - last_draw > 2.0 and last_mph is None:
+                    render("NO FIX")
+                    last_draw = time.monotonic()
+                continue
+            try:
+                line = raw.decode("ascii", errors="ignore")
+            except UnicodeDecodeError:
+                continue
+            mph = parse_rmc_speed_mph(line)
+            if mph is None:
+                continue
+            now = time.monotonic()
+            if last_mph is not None and abs(mph - last_mph) < 0.2 and now - last_draw < 0.5:
+                continue
+            last_mph = mph
+            render(format_speed(mph))
+            last_draw = now
+
+
+if __name__ == "__main__":
+    main()

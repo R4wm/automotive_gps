@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""Scroll HAT Mini: GPS speed / ESTHER scroll, button A cycles modes."""
+
+from __future__ import annotations
+
+import signal
+import sys
+import threading
+import time
+
+import scrollphathd as sphd
+import serial
+from gpiozero import Button
+from scrollphathd.fonts import font5x7
+
+KNOTS_TO_MPH = 1.15078
+GPS_PORT = "/dev/ttyUSB0"
+GPS_BAUD = 4800
+BRIGHTNESS = 0.75
+ESTHER_TEXT = "ESTHER"
+ESTHER_FPS = 15
+ESTHER_GAP = 8
+BUTTON_A_PIN = 5  # Scroll HAT Mini button A
+
+MODE_GPS = "gps"
+MODE_ESTHER = "esther"
+MODES = (MODE_GPS, MODE_ESTHER)
+
+
+def parse_rmc_speed_mph(line: str) -> float | None:
+    line = line.strip()
+    if len(line) < 10 or line[0] != "$":
+        return None
+    if not line.split(",", 1)[0].endswith("RMC"):
+        return None
+    parts = line.split(",")
+    if len(parts) < 8 or parts[2] != "A":
+        return None
+    try:
+        knots = float(parts[7])
+    except ValueError:
+        return None
+    return max(0.0, knots * KNOTS_TO_MPH)
+
+
+def format_speed(mph: float | None) -> str:
+    if mph is None:
+        return "NO FIX"
+    if mph < 10:
+        return f"{mph:.1f}MPH"
+    return f"{mph:.0f} MPH"
+
+
+def render_text(text: str) -> None:
+    sphd.clear()
+    width = sphd.calculate_string_width(text, font5x7, 0, False)
+    x = max(0, (sphd.DISPLAY_WIDTH - width) // 2)
+    sphd.write_string(text, x=x, y=0, letter_spacing=0, brightness=BRIGHTNESS)
+    sphd.scroll_to(0, 0)
+    sphd.show()
+
+
+class EstherMode:
+    def __init__(self) -> None:
+        self.offset = 0
+        self.total = 0
+        self.ready = False
+
+    def reset(self) -> None:
+        self.offset = 0
+        self.total = 0
+        self.ready = False
+
+    def tick(self) -> None:
+        if not self.ready:
+            sphd.clear()
+            sphd.write_string(
+                ESTHER_TEXT, x=17, y=0, letter_spacing=0, brightness=BRIGHTNESS
+            )
+            text_width = sphd.calculate_string_width(ESTHER_TEXT, font5x7, 0, False)
+            self.total = 17 + text_width + ESTHER_GAP
+            self.ready = True
+        sphd.scroll_to(self.offset, 0)
+        sphd.show()
+        self.offset += 1
+        if self.offset >= self.total:
+            self.offset = 0
+
+
+class GpsMode:
+    def __init__(self) -> None:
+        self._ser: serial.Serial | None = None
+        self.last_mph: float | None = None
+        self.last_draw = 0.0
+        self.port_error = False
+
+    def reset(self) -> None:
+        self.last_mph = None
+        self.last_draw = 0.0
+        self.port_error = False
+        if self._ser is not None:
+            try:
+                self._ser.close()
+            except OSError:
+                pass
+            self._ser = None
+
+    def tick(self) -> None:
+        if self._ser is None and not self.port_error:
+            try:
+                self._ser = serial.Serial(GPS_PORT, GPS_BAUD, timeout=0.2)
+            except (OSError, serial.SerialException):
+                self.port_error = True
+                render_text("NO GPS")
+                return
+
+        if self.port_error:
+            render_text("NO GPS")
+            return
+
+        mph = self.last_mph
+        assert self._ser is not None
+        for _ in range(12):
+            raw = self._ser.readline()
+            if not raw:
+                break
+            parsed = parse_rmc_speed_mph(raw.decode("ascii", errors="ignore"))
+            if parsed is not None:
+                mph = parsed
+
+        now = time.monotonic()
+        if mph is None:
+            if now - self.last_draw > 1.0:
+                render_text("NO FIX")
+                self.last_draw = now
+            return
+
+        if (
+            self.last_mph is not None
+            and abs(mph - self.last_mph) < 0.2
+            and now - self.last_draw < 0.5
+        ):
+            return
+
+        self.last_mph = mph
+        render_text(format_speed(mph))
+        self.last_draw = now
+
+
+def main() -> None:
+    sphd.setup()
+    sphd.set_clear_on_exit(True)
+    sphd.set_font(font5x7)
+
+    lock = threading.Lock()
+    mode_idx = 0
+    pending_banner: str | None = None
+
+    esther = EstherMode()
+    gps = GpsMode()
+
+    def stop(_signum=None, _frame=None) -> None:
+        sphd.clear()
+        sphd.show()
+        button_a.close()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
+
+    def on_button_a() -> None:
+        nonlocal mode_idx, pending_banner
+        with lock:
+            mode_idx = (mode_idx + 1) % len(MODES)
+            esther.reset()
+            gps.reset()
+            pending_banner = "GPS" if MODES[mode_idx] == MODE_GPS else "ESTH"
+
+    button_a = Button(BUTTON_A_PIN)
+    button_a.when_pressed = on_button_a
+
+    render_text("GPS")
+    time.sleep(0.6)
+
+    while True:
+        with lock:
+            banner = pending_banner
+            pending_banner = None
+            current = MODES[mode_idx]
+
+        if banner:
+            render_text(banner)
+            time.sleep(0.7)
+
+        if current == MODE_GPS:
+            gps.tick()
+            time.sleep(0.15)
+        else:
+            esther.tick()
+            time.sleep(1 / ESTHER_FPS)
+
+
+if __name__ == "__main__":
+    main()

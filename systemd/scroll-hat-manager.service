@@ -1,0 +1,14 @@
+[Unit]
+Description=Scroll HAT Mini display (GPS speed / ESTHER)
+After=multi-user.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/scroll-hat-manager
+Restart=always
+RestartSec=5
+SupplementaryGroups=dialout gpio i2c
+
+[Install]
+WantedBy=multi-user.target

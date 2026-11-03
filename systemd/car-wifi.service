@@ -1,0 +1,12 @@
+[Unit]
+Description=Background WiFi client (no boot blocking)
+After=networking.service
+Before=dietpi-wifi-monitor.service ssh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/car-wifi-start.sh
+
+[Install]
+WantedBy=multi-user.target

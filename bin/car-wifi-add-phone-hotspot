@@ -1,0 +1,23 @@
+#!/bin/bash
+set -euo pipefail
+if [[ $# -ne 2 ]]; then
+  echo "Usage: $0 <hotspot-ssid> <hotspot-password>" >&2
+  exit 1
+fi
+SSID=$1
+PASS=$2
+CONF=/etc/wpa_supplicant/wpa_supplicant.conf
+TMP=$(mktemp)
+awk '/^# BEGIN phone-hotspot/{skip=1} /^# END phone-hotspot/{skip=0;next} !skip' "$CONF" > "$TMP"
+{
+  cat "$TMP"
+  echo "# BEGIN phone-hotspot"
+  wpa_passphrase "$SSID" "$PASS" | awk '/network=\{/{print; print "\tpriority=10"; next} {print}'
+  echo "# END phone-hotspot"
+} > "${CONF}.new"
+mv "${CONF}.new" "$CONF"
+chmod 600 "$CONF"
+echo "Added phone hotspot (priority 10). Reconnecting wlan0..."
+ifdown wlan0 2>/dev/null || true
+( ifup wlan0 >>/var/log/car-wifi.log 2>&1 ) &
+echo "Done."
