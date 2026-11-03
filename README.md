@@ -5,6 +5,7 @@ Raspberry Pi Zero W (DietPi) in-car display: USB GPS speed on a Pimoroni **Scrol
 **Target hardware**
 
 - Raspberry Pi Zero W
+- [Enviro / Enviro+](https://shop.pimoroni.com/products/enviro-plus) (BME280 + LTR559 + **160×80 LCD**), **or**
 - [Scroll HAT Mini](https://shop.pimoroni.com/products/scroll-hat-mini) (I2C `0x74`, button A = GPIO 5)
 - USB GPS on `/dev/ttyUSB0` (NMEA, typically **4800 baud**)
 
@@ -12,7 +13,8 @@ Raspberry Pi Zero W (DietPi) in-car display: USB GPS speed on a Pimoroni **Scrol
 
 | Component | Behavior |
 |-----------|----------|
-| **scroll-hat-manager** | System service: GPS speed (MPH) by default; **button A** cycles GPS ↔ ESTHER scroll |
+| **enviro-gps-speed** | **Enviro LCD:** large integer speed; **LTR559** auto-dims backlight (system service) |
+| **scroll-hat-manager** | Scroll HAT: GPS speed; **button A** cycles GPS ↔ ESTHER scroll |
 | **gps-speed-hat** / **scroll-esther** | Standalone scripts (same logic as manager modes) |
 | **car-wifi** | `allow-hotplug wlan0`; WiFi comes up in background after boot; wpa_supplicant keeps scanning |
 | **Phone hotspot** | `car-wifi-add-phone-hotspot` adds SSID at **priority 10** (home usually **5**) |

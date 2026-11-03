@@ -14,8 +14,14 @@ install -m 755 "$ROOT/bin/gps-speed-hat" /usr/local/bin/gps-speed-hat
 install -m 755 "$ROOT/bin/scroll-hat-manager" /usr/local/bin/scroll-hat-manager
 install -m 755 "$ROOT/bin/car-wifi-start.sh" /usr/local/bin/car-wifi-start.sh
 install -m 755 "$ROOT/bin/car-wifi-add-phone-hotspot" /usr/local/bin/car-wifi-add-phone-hotspot
+if [[ -f "$ROOT/bin/enviro-gps-speed" ]]; then
+  install -m 755 "$ROOT/bin/enviro-gps-speed" /usr/local/bin/enviro-gps-speed
+fi
 
 install -m 644 "$ROOT/systemd/scroll-hat-manager.service" /etc/systemd/system/scroll-hat-manager.service
+if [[ -f "$ROOT/systemd/enviro-gps-speed.service" ]]; then
+  install -m 644 "$ROOT/systemd/enviro-gps-speed.service" /etc/systemd/system/enviro-gps-speed.service
+fi
 install -m 644 "$ROOT/systemd/car-wifi.service" /etc/systemd/system/car-wifi.service
 install -d /etc/systemd/system/dietpi-wifi-monitor.service.d
 install -m 644 "$ROOT/systemd/dietpi-wifi-monitor.service.d/car-wifi.conf" \
@@ -37,8 +43,14 @@ fi
 
 touch /var/log/car-wifi.log
 systemctl daemon-reload
-systemctl enable scroll-hat-manager.service car-wifi.service
+systemctl enable car-wifi.service
 systemctl restart car-wifi.service || true
-systemctl restart scroll-hat-manager.service || true
+if [[ -f /usr/local/bin/enviro-gps-speed ]]; then
+  systemctl enable enviro-gps-speed.service
+  systemctl restart enviro-gps-speed.service || true
+elif [[ -f /usr/local/bin/scroll-hat-manager ]]; then
+  systemctl enable scroll-hat-manager.service
+  systemctl restart scroll-hat-manager.service || true
+fi
 
 echo "Install complete."

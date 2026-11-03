@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""Large GPS speed on Enviro/Enviro+ LCD; LTR559 auto-brightness."""
+
+from __future__ import annotations
+
+import argparse
+import signal
+import sys
+import time
+
+import ST7735 as st7735
+import serial
+from PIL import Image, ImageDraw, ImageFont
+from smbus2 import SMBus
+from ltr559 import LTR559
+
+KNOTS_TO_MPH = 1.15078
+DEFAULT_PORT = "/dev/ttyUSB0"
+DEFAULT_BAUD = 4800
+
+# Display (160x80 landscape after rotation=270)
+MARGIN = 6
+BG = (0, 0, 0)
+FG = (255, 255, 255)
+NO_FIX_TEXT = "--"
+
+# Backlight: smoothed 0–100
+BRIGHTNESS_MIN = 10.0
+BRIGHTNESS_MAX = 100.0
+LUX_SMOOTH = 0.82  # higher = slower brightness changes
+
+
+def parse_rmc_speed_mph(line: str) -> float | None:
+    line = line.strip()
+    if len(line) < 10 or line[0] != "$":
+        return None
+    if not line.split(",", 1)[0].endswith("RMC"):
+        return None
+    parts = line.split(",")
+    if len(parts) < 8 or parts[2] != "A":
+        return None
+    try:
+        knots = float(parts[7])
+    except ValueError:
+        return None
+    return max(0.0, knots * KNOTS_TO_MPH)
+
+
+def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    try:
+        from fonts.ttf import RobotoMedium as font_path
+
+        return ImageFont.truetype(font_path, size)
+    except (ImportError, OSError):
+        return ImageFont.load_default()
+
+
+def fit_font(
+    draw: ImageDraw.ImageDraw, text: str, max_w: int, max_h: int
+) -> tuple[ImageFont.FreeTypeFont | ImageFont.ImageFont, int, int]:
+    for size in range(76, 18, -2):
+        font = load_font(size)
+        x1, y1, x2, y2 = draw.textbbox((0, 0), text, font=font)
+        w, h = x2 - x1, y2 - y1
+        if w <= max_w and h <= max_h:
+            return font, w, h
+    font = load_font(18)
+    x1, y1, x2, y2 = draw.textbbox((0, 0), text, font=font)
+    return font, x2 - x1, y2 - y1
+
+
+def lux_to_backlight(lux: float) -> float:
+    """Map ambient lux to backlight percent (tuned for in-car use)."""
+    if lux < 0.01:
+        return BRIGHTNESS_MIN
+    if lux < 2:
+        return 15.0
+    if lux < 15:
+        return 15.0 + (lux - 2) * 2.5  # ~15–47
+    if lux < 120:
+        return 47.0 + (lux - 15) * 0.45  # ~47–94
+    return BRIGHTNESS_MAX
+
+
+def format_speed(mph: float | None) -> str:
+    if mph is None:
+        return NO_FIX_TEXT
+    return str(int(round(mph)))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Enviro LCD GPS speed")
+    parser.add_argument("--port", default=DEFAULT_PORT)
+    parser.add_argument("--baud", type=int, default=DEFAULT_BAUD)
+    parser.add_argument("--no-auto-brightness", action="store_true")
+    args = parser.parse_args()
+
+    disp = st7735.ST7735(
+        port=0,
+        cs=1,
+        dc=9,
+        backlight=12,
+        rotation=270,
+        spi_speed_hz=6000000,
+    )
+    disp.begin()
+    disp.set_backlight(BRIGHTNESS_MAX)
+
+    bus = SMBus(1)
+    ltr = LTR559(i2c_dev=bus)
+
+    img = Image.new("RGB", (disp.width, disp.height), BG)
+    draw = ImageDraw.Draw(img)
+
+    ser: serial.Serial | None = None
+    last_mph: float | None = None
+    last_speed_draw = 0.0
+    shown_text = ""
+    backlight = BRIGHTNESS_MAX
+    last_lux_sample = 0.0
+
+    def stop(_signum=None, _frame=None) -> None:
+        disp.set_backlight(0)
+        if ser is not None:
+            ser.close()
+        bus.close()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
+
+    try:
+        ser = serial.Serial(args.port, args.baud, timeout=0.15)
+    except (OSError, serial.SerialException):
+        ser = None
+
+    while True:
+        mph = last_mph
+        if ser is not None:
+            for _ in range(16):
+                raw = ser.readline()
+                if not raw:
+                    break
+                parsed = parse_rmc_speed_mph(raw.decode("ascii", errors="ignore"))
+                if parsed is not None:
+                    mph = parsed
+        last_mph = mph
+
+        now = time.monotonic()
+        text = format_speed(mph)
+        speed_due = (
+            text != shown_text
+            or now - last_speed_draw > 1.0
+            or shown_text == NO_FIX_TEXT
+        )
+
+        if speed_due:
+            max_w = disp.width - 2 * MARGIN
+            max_h = disp.height - 2 * MARGIN
+            font, tw, th = fit_font(draw, text, max_w, max_h)
+            draw.rectangle((0, 0, disp.width, disp.height), fill=BG)
+            x = (disp.width - tw) / 2
+            y = (disp.height - th) / 2 - 2
+            draw.text((x, y), text, font=font, fill=FG)
+            disp.display(img)
+            shown_text = text
+            last_speed_draw = now
+
+        if not args.no_auto_brightness and now - last_lux_sample >= 0.4:
+            last_lux_sample = now
+            try:
+                target = lux_to_backlight(ltr.get_lux())
+            except OSError:
+                target = backlight
+            backlight = LUX_SMOOTH * backlight + (1.0 - LUX_SMOOTH) * target
+            disp.set_backlight(int(round(backlight)))
+
+        time.sleep(0.08)
+
+
+if __name__ == "__main__":
+    main()
