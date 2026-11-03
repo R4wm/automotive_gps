@@ -45,10 +45,18 @@ sudo apt install -y python3-pip python3-serial python3-gpiozero python3-lgpio i2
 sudo pip3 install scrollphathd --break-system-packages
 ```
 
-Enable I2C in `/boot/firmware/config.txt`:
+**Enviro / Enviro+ LCD** (Pi OS Bookworm/Trixie on Pi Zero): **`st7735==0.0.5`** + **`python3-rpi.gpio`** (not `st7735` 1.x):
+
+```bash
+sudo apt install -y python3-rpi.gpio python3-pil python3-smbus
+sudo pip3 install enviroplus "st7735==0.0.5" bme280 ltr559 smbus2 --break-system-packages
+```
+
+Enable I2C and SPI in `/boot/firmware/config.txt`:
 
 ```text
 dtparam=i2c_arm=on
+dtparam=spi=on
 ```
 
 Add `i2c-dev` to `/etc/modules` if `/dev/i2c-1` is missing after reboot.
