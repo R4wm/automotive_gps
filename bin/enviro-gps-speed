@@ -32,6 +32,7 @@ DEFAULT_IDLE_MAX_MPH = 3.0
 SPI_SPEED_HZ = 10_000_000  # Pimoroni Enviro examples; faster full-frame updates
 DEFAULT_IDLE_GIF_SPEED = 2.5  # multiply GIF frame rate (1 = file timing)
 IDLE_STATIC_HOLD_SEC = 2.5  # how long PNG / still frames stay up
+DEFAULT_RECORDS_PAGE_SEC = 4.0
 LOOP_SLEEP_IDLE = 0.008
 LOOP_SLEEP_NORMAL = 0.025
 
@@ -314,6 +315,12 @@ def main() -> None:
         action="store_true",
         help="Do not record distance to Redis/JSON",
     )
+    parser.add_argument(
+        "--records-page-sec",
+        type=float,
+        default=DEFAULT_RECORDS_PAGE_SEC,
+        help="Seconds per stats page at 0 mph (default: 4)",
+    )
     args = parser.parse_args()
 
     disp = st7735.ST7735(
@@ -346,6 +353,8 @@ def main() -> None:
     last_fix_ok = False
     last_rmc_at = 0.0
     last_speed_draw = 0.0
+    records_page = 0
+    last_records_page_flip = 0.0
     last_idle_anim = 0.0
     idle_clip_index = 0
     idle_frame_index = 0
@@ -361,14 +370,34 @@ def main() -> None:
         draw_text_centered(draw, text, font, disp.width, disp.height, FG)
         disp.display(img)
 
-    def paint_personal_records() -> None:
+    def paint_personal_records(page: int) -> None:
         draw.rectangle((0, 0, disp.width, disp.height), fill=BG)
         odometer = int(round(mileage.odometer_miles)) if mileage else 0
+        page = page % 2
+
+        if page == 1:
+            label_font = load_font(16)
+            if records is None:
+                value_text = "--"
+            else:
+                value_text = format_sec(records.best_twenty_sixty_sec)
+            draw.text((8, 6), "20-60", font=label_font, fill=(140, 140, 140))
+            max_w = disp.width - 2 * MARGIN
+            value_top = 22
+            max_h = disp.height - value_top - MARGIN
+            font, _tw, th = fit_font(draw, value_text, max_w, max_h)
+            x1, y1, x2, y2 = draw.textbbox((0, 0), value_text, font=font)
+            tw, th = x2 - x1, y2 - y1
+            x = (disp.width - tw) / 2 - x1
+            y = value_top + (max_h - th) / 2 - y1
+            draw.text((x, y), value_text, font=font, fill=FG)
+            disp.display(img)
+            return
+
         if records is None:
             rows = [
                 ("1/8", "--"),
                 ("0-60", "--"),
-                ("20-60", "--"),
                 ("TOP", "--"),
                 ("MI", str(odometer)),
             ]
@@ -376,17 +405,16 @@ def main() -> None:
             rows = [
                 ("1/8", format_sec(records.best_eighth_mile_sec)),
                 ("0-60", format_sec(records.best_zero_sixty_sec)),
-                ("20-60", format_sec(records.best_twenty_sixty_sec)),
                 ("TOP", str(int(round(records.top_speed_mph)))),
                 ("MI", str(odometer)),
             ]
-        label_font = load_font(13)
-        value_font = load_font(15)
-        y = 2
+        label_font = load_font(14)
+        value_font = load_font(17)
+        y = 5
         for label, value in rows:
-            draw.text((4, y), label, font=label_font, fill=(140, 140, 140))
-            draw.text((68, y - 1), value, font=value_font, fill=FG)
-            y += 16
+            draw.text((6, y), label, font=label_font, fill=(140, 140, 140))
+            draw.text((72, y - 1), value, font=value_font, fill=FG)
+            y += 19
         disp.display(img)
 
     def ensure_idle_clips() -> None:
@@ -549,10 +577,22 @@ def main() -> None:
         )
 
         if key == "records":
-            if key != shown_key or now - last_speed_draw >= 2.0:
-                paint_personal_records()
+            page_sec = max(args.records_page_sec, 1.0)
+            if key != shown_key:
+                records_page = 0
+                last_records_page_flip = now
+                paint_personal_records(records_page)
                 shown_key = key
                 last_speed_draw = now
+            else:
+                if now - last_records_page_flip >= page_sec:
+                    records_page = (records_page + 1) % 2
+                    last_records_page_flip = now
+                    paint_personal_records(records_page)
+                    last_speed_draw = now
+                elif now - last_speed_draw >= 2.0:
+                    paint_personal_records(records_page)
+                    last_speed_draw = now
         elif key == "idle":
             if key != shown_key:
                 reset_idle_playback()
