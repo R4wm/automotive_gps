@@ -1,4 +1,0 @@
-# ST7735 color mapping for Enviro / Enviro+ LCD (ST7735 0.0.5).
-# Pimoroni default: both 1. If colors look wrong, run enviro-lcd-calibrate.
-ST7735_INVERT=1
-ST7735_BGR=1
