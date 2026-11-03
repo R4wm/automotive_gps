@@ -55,3 +55,15 @@ redis-cli HGETALL automotive_gps:mileage
 Copy `/var/lib/automotive_gps/odometer.json` or pipe `automotive-gps-miles --export` into your sync script.
 
 Only speed **≥ 1 mph** with a GPS fix counts (idle / parking jitter is ignored).
+
+## Personal records
+
+Tracked when GPS fix is **A** (valid):
+
+| Record | Rule |
+|--------|------|
+| **0–60** | Lowest time from **≥ 1 mph** to **≥ 60 mph** |
+| **20–60** | Lowest time from **≥ 20 mph** to **≥ 60 mph** |
+| **Top speed** | Maximum mph seen |
+
+Stored in **`/var/lib/automotive_gps/records.json`** and Redis hash **`automotive_gps:records`**. At **0 mph**, the Enviro LCD shows all four lines (including odometer **MI**).

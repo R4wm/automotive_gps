@@ -13,7 +13,7 @@ Raspberry Pi Zero W (DietPi) in-car display: USB GPS speed on a Pimoroni **Scrol
 
 | Component | Behavior |
 |-----------|----------|
-| **enviro-gps-speed** | **Enviro LCD:** speed / idle art; **mileage → Redis + JSON** ([docs/mileage.md](docs/mileage.md)) |
+| **enviro-gps-speed** | **Enviro LCD:** speed when moving; **personal records at 0 mph**; mileage → Redis + JSON |
 | **scroll-hat-manager** | Scroll HAT: GPS speed; **button A** cycles GPS ↔ ESTHER scroll |
 | **gps-speed-hat** / **scroll-esther** | Standalone scripts (same logic as manager modes) |
 | **car-wifi** | `allow-hotplug wlan0`; WiFi comes up in background after boot; wpa_supplicant keeps scanning |
@@ -91,7 +91,7 @@ automotive-gps-miles    # odometer / trip (Redis + /var/lib/automotive_gps/odome
 
 Mileage: `apt install redis-server python3-redis` and see [docs/mileage.md](docs/mileage.md).
 
-**Enviro idle art:** At **0–3 mph**, the LCD cycles **`idle-rotation.txt`**: `shyguy-with_sling.gif` → `fat_shy-guy.gif` → `jammin_shyguy.png` (loop). Edit that file in `assets/` and re-run `install.sh` to change order or add GIFs/PNGs. Single file only: `--idle-image /path/to.gif`. Options: `--idle-gif-speed 3`, `--no-idle-image`.
+**At 0 mph** (GPS live), the LCD shows **personal records**: best **0–60**, **20–60**, **top speed**, and **odometer miles**. Records persist in `/var/lib/automotive_gps/records.json` and Redis `automotive_gps:records`. Check with `automotive-gps-miles`. Optional GIF idle art: `--idle-image /path/to.gif` (0–3 mph). See [docs/mileage.md](docs/mileage.md).
 
 ## Repository layout
 

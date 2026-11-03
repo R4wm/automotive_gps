@@ -24,6 +24,10 @@ if [[ -f "$ROOT/lib/mileage.py" ]]; then
   install -d /usr/local/lib/automotive_gps
   install -m 644 "$ROOT/lib/mileage.py" /usr/local/lib/automotive_gps/mileage.py
 fi
+if [[ -f "$ROOT/lib/records.py" ]]; then
+  install -d /usr/local/lib/automotive_gps
+  install -m 644 "$ROOT/lib/records.py" /usr/local/lib/automotive_gps/records.py
+fi
 install -d -m 755 /var/lib/automotive_gps
 if command -v redis-server >/dev/null 2>&1; then
   install -d -m 755 -o redis -g redis /var/log/redis 2>/dev/null || mkdir -p /var/log/redis

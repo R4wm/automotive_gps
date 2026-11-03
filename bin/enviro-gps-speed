@@ -21,6 +21,7 @@ else:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 from mileage import MileageStore  # noqa: E402
+from records import PersonalRecordsStore  # noqa: E402
 
 KNOTS_TO_MPH = 1.15078
 DEFAULT_PORT = "/dev/ttyUSB0"
@@ -57,25 +58,25 @@ NO_GPS_TEXT = "--"
 GPS_STALE_SEC = 5.0
 
 
-def parse_rmc_line(line: str) -> tuple[bool, float | None]:
-    """Return (is_rmc, mph). mph is set for fix (A) or 0.0 for no-fix (V)."""
+def parse_rmc_line(line: str) -> tuple[bool, float | None, bool]:
+    """Return (is_rmc, mph, fix_ok). mph set for A or 0.0 for V."""
     line = line.strip()
     if len(line) < 10 or line[0] != "$":
-        return False, None
+        return False, None, False
     if not line.split(",", 1)[0].endswith("RMC"):
-        return False, None
+        return False, None, False
     parts = line.split(",")
     if len(parts) < 8:
-        return True, 0.0
+        return True, 0.0, False
     if parts[2] == "V":
-        return True, 0.0
+        return True, 0.0, False
     if parts[2] != "A":
-        return True, None
+        return True, None, False
     try:
         knots = float(parts[7])
     except ValueError:
-        return True, 0.0
-    return True, max(0.0, knots * KNOTS_TO_MPH)
+        return True, 0.0, True
+    return True, max(0.0, knots * KNOTS_TO_MPH), True
 
 
 def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -210,6 +211,12 @@ def load_idle_playlist(
     return clips
 
 
+def format_sec(value: float | None) -> str:
+    if value is None:
+        return "--"
+    return f"{value:.1f}s"
+
+
 def display_key(
     mph: float | None,
     idle_max_mph: float,
@@ -223,6 +230,8 @@ def display_key(
     shown = int(text)
     if idle_enabled and shown <= int(round(idle_max_mph)):
         return "idle"
+    if shown == 0 and gps_live:
+        return "records"
     return f"text:{text}"
 
 
@@ -236,7 +245,7 @@ def main() -> None:
         type=Path,
         default=None,
         dest="idle_image",
-        help="Single idle PNG/GIF only (disables rotation playlist)",
+        help="Optional PNG/GIF at 0–idle-max mph (default: personal records at 0 mph)",
     )
     parser.add_argument(
         "--idle-dir",
@@ -284,12 +293,15 @@ def main() -> None:
     img = Image.new("RGB", (disp.width, disp.height), BG)
     draw = ImageDraw.Draw(img)
 
+    use_idle_art = bool(args.idle_image) and not args.no_idle_image
     idle_clips: list[IdleClip] = []
-    idle_clips_loaded = args.no_idle_image
+    idle_clips_loaded = not use_idle_art
     gif_speed = max(args.idle_gif_speed, 0.1)
 
     mileage: MileageStore | None = None
+    records: PersonalRecordsStore | None = None
     last_mileage_flush = time.monotonic()
+    last_records_flush = time.monotonic()
 
     ser: serial.Serial | None = None
     last_mph: float | None = None
@@ -308,6 +320,32 @@ def main() -> None:
         font, _tw, _th = fit_font(draw, text, max_w, max_h)
         draw.rectangle((0, 0, disp.width, disp.height), fill=BG)
         draw_text_centered(draw, text, font, disp.width, disp.height, FG)
+        disp.display(img)
+
+    def paint_personal_records() -> None:
+        draw.rectangle((0, 0, disp.width, disp.height), fill=BG)
+        label_font = load_font(14)
+        value_font = load_font(17)
+        odometer = int(round(mileage.odometer_miles)) if mileage else 0
+        if records is None:
+            rows = [
+                ("0-60", "--"),
+                ("20-60", "--"),
+                ("TOP", "--"),
+                ("MI", str(odometer)),
+            ]
+        else:
+            rows = [
+                ("0-60", format_sec(records.best_zero_sixty_sec)),
+                ("20-60", format_sec(records.best_twenty_sixty_sec)),
+                ("TOP", str(int(round(records.top_speed_mph)))),
+                ("MI", str(odometer)),
+            ]
+        y = 5
+        for label, value in rows:
+            draw.text((6, y), label, font=label_font, fill=(140, 140, 140))
+            draw.text((72, y - 1), value, font=value_font, fill=FG)
+            y += 19
         disp.display(img)
 
     def ensure_idle_clips() -> None:
@@ -358,6 +396,8 @@ def main() -> None:
             ser.close()
         if mileage is not None:
             mileage.flush()
+        if records is not None:
+            records.flush()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, stop)
@@ -399,6 +439,10 @@ def main() -> None:
             mileage = MileageStore()
         except OSError:
             mileage = None
+    try:
+        records = PersonalRecordsStore()
+    except OSError:
+        records = None
 
     open_serial()
 
@@ -411,13 +455,17 @@ def main() -> None:
                     raw = ser.readline()
                     if not raw:
                         break
-                    is_rmc, parsed = parse_rmc_line(
+                    is_rmc, parsed, fix_ok = parse_rmc_line(
                         raw.decode("ascii", errors="ignore")
                     )
                     if is_rmc:
                         last_rmc_at = now
                         if parsed is not None:
                             mph = parsed
+                        if records is not None and parsed is not None and fix_ok:
+                            records.tick_speed(parsed, now, fix_ok=True)
+                            if records.maybe_flush(now, last_records_flush):
+                                last_records_flush = now
             except serial.SerialException:
                 close_serial()
         elif now - last_serial_open >= SERIAL_REOPEN_SEC:
@@ -432,9 +480,9 @@ def main() -> None:
             if mileage.maybe_flush(now, last_mileage_flush):
                 last_mileage_flush = now
 
-        if not args.no_idle_image:
+        if use_idle_art:
             ensure_idle_clips()
-        idle_enabled = not args.no_idle_image and bool(idle_clips)
+        idle_enabled = use_idle_art and bool(idle_clips)
         key = display_key(
             display_mph,
             args.idle_max_mph,
@@ -442,7 +490,12 @@ def main() -> None:
             gps_live=gps_live,
         )
 
-        if key == "idle":
+        if key == "records":
+            if key != shown_key or now - last_speed_draw >= 2.0:
+                paint_personal_records()
+                shown_key = key
+                last_speed_draw = now
+        elif key == "idle":
             if key != shown_key:
                 reset_idle_playback()
                 shown_key = key
@@ -461,6 +514,8 @@ def main() -> None:
 
         if key == "idle" and idle_clips:
             time.sleep(LOOP_SLEEP_IDLE)
+        elif key == "records":
+            time.sleep(0.15)
         else:
             time.sleep(LOOP_SLEEP_NORMAL)
 

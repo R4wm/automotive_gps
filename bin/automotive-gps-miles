@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Show or export mileage stored by enviro-gps-speed (Redis + JSON)."""
+"""Show mileage and personal records from enviro-gps-speed (Redis + JSON)."""
 
 from __future__ import annotations
 
@@ -15,20 +15,34 @@ else:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 from mileage import DEFAULT_STATE_PATH, MileageStore, load_snapshot  # noqa: E402
+from records import DEFAULT_STATE_PATH as RECORDS_PATH  # noqa: E402
+from records import PersonalRecordsStore  # noqa: E402
+
+
+def fmt_sec(value: float | None) -> str:
+    if value is None:
+        return "--"
+    return f"{value:.2f}s"
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Automotive GPS mileage")
+    parser = argparse.ArgumentParser(description="Automotive GPS mileage & records")
     parser.add_argument(
         "--state-file",
         type=Path,
         default=DEFAULT_STATE_PATH,
-        help="Local JSON backup path",
+        help="Mileage JSON path",
+    )
+    parser.add_argument(
+        "--records-file",
+        type=Path,
+        default=RECORDS_PATH,
+        help="Personal records JSON path",
     )
     parser.add_argument(
         "--export",
         action="store_true",
-        help="Print full JSON (for upload)",
+        help="Print combined JSON (for upload)",
     )
     parser.add_argument(
         "--reset-trip",
@@ -43,16 +57,21 @@ def main() -> None:
         print("Trip miles reset.")
         return
 
-    snap = load_snapshot(state_path=args.state_file)
+    mileage = load_snapshot(state_path=args.state_file)
+    records = PersonalRecordsStore(state_path=args.records_file).snapshot()
+
     if args.export:
-        print(json.dumps(snap, indent=2))
+        print(json.dumps({"mileage": mileage, "records": records}, indent=2))
         return
 
-    print(f"Device:    {snap['device_id']}")
-    print(f"Odometer:  {snap['odometer_miles']:.2f} mi")
-    print(f"Trip:      {snap['trip_miles']:.2f} mi")
-    print(f"Updated:   {snap['updated_at']}")
-    print(f"State file: {args.state_file}")
+    print(f"Device:    {mileage['device_id']}")
+    print(f"Odometer:  {mileage['odometer_miles']:.2f} mi")
+    print(f"Trip:      {mileage['trip_miles']:.2f} mi")
+    print(f"0-60:      {fmt_sec(records.get('best_zero_sixty_sec'))}")
+    print(f"20-60:     {fmt_sec(records.get('best_twenty_sixty_sec'))}")
+    print(f"Top speed: {records.get('top_speed_mph', 0):.0f} mph")
+    print(f"Updated:   {mileage['updated_at']}")
+    print(f"State:     {args.state_file}")
 
 
 if __name__ == "__main__":
