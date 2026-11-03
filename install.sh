@@ -17,15 +17,6 @@ install -m 755 "$ROOT/bin/car-wifi-add-phone-hotspot" /usr/local/bin/car-wifi-ad
 if [[ -f "$ROOT/bin/enviro-gps-speed" ]]; then
   install -m 755 "$ROOT/bin/enviro-gps-speed" /usr/local/bin/enviro-gps-speed
 fi
-if [[ -f "$ROOT/bin/enviro-lcd-calibrate" ]]; then
-  install -m 755 "$ROOT/bin/enviro-lcd-calibrate" /usr/local/bin/enviro-lcd-calibrate
-fi
-if [[ -f "$ROOT/config/enviro-gps-speed.default" ]]; then
-  install -d /etc/default
-  if [[ ! -f /etc/default/enviro-gps-speed ]]; then
-    install -m 644 "$ROOT/config/enviro-gps-speed.default" /etc/default/enviro-gps-speed
-  fi
-fi
 
 install -m 644 "$ROOT/systemd/scroll-hat-manager.service" /etc/systemd/system/scroll-hat-manager.service
 if [[ -f "$ROOT/systemd/enviro-gps-speed.service" ]]; then

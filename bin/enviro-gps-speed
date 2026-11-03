@@ -7,9 +7,7 @@ import argparse
 import signal
 import sys
 import time
-from pathlib import Path
 
-import RPi.GPIO as GPIO
 import ST7735 as st7735
 import serial
 from PIL import Image, ImageDraw, ImageFont
@@ -17,14 +15,12 @@ from PIL import Image, ImageDraw, ImageFont
 KNOTS_TO_MPH = 1.15078
 DEFAULT_PORT = "/dev/ttyUSB0"
 DEFAULT_BAUD = 4800
-LCD_DEFAULTS = Path("/etc/default/enviro-gps-speed")
 
 # Display (160x80 landscape after rotation=270)
 MARGIN = 6
 BG = (0, 0, 0)
 FG = (255, 255, 255)
 NO_FIX_TEXT = "--"
-BACKLIGHT_PIN = 12
 
 
 def parse_rmc_speed_mph(line: str) -> float | None:
@@ -41,38 +37,6 @@ def parse_rmc_speed_mph(line: str) -> float | None:
     except ValueError:
         return None
     return max(0.0, knots * KNOTS_TO_MPH)
-
-
-def parse_bool(value: str) -> bool:
-    return value.strip().lower() not in ("0", "false", "no", "off")
-
-
-def read_lcd_tuning() -> tuple[bool, bool]:
-    """ST7735 invert/bgr flags (Pimoroni Enviro defaults: both true)."""
-    invert, bgr = True, True
-    if not LCD_DEFAULTS.is_file():
-        return invert, bgr
-    for raw in LCD_DEFAULTS.read_text().splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, val = line.split("=", 1)
-        key = key.strip()
-        val = val.strip().strip('"').strip("'")
-        if key == "ST7735_INVERT":
-            invert = parse_bool(val)
-        elif key == "ST7735_BGR":
-            bgr = parse_bool(val)
-    return invert, bgr
-
-
-def prepare_backlight_pin() -> None:
-    """Backlight pin must be plain GPIO out (not PWM from older builds)."""
-    GPIO.setwarnings(False)
-    if GPIO.getmode() is None:
-        GPIO.setmode(GPIO.BCM)
-    GPIO.setup(BACKLIGHT_PIN, GPIO.OUT)
-    GPIO.output(BACKLIGHT_PIN, GPIO.HIGH)
 
 
 def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -98,6 +62,21 @@ def fit_font(
     return font, x2 - x1, y2 - y1
 
 
+def draw_text_centered(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    width: int,
+    height: int,
+    fill: tuple[int, int, int],
+) -> None:
+    """Center text in the panel (PIL uses baseline anchoring at x, y)."""
+    x1, y1, x2, y2 = draw.textbbox((0, 0), text, font=font)
+    x = (width - (x2 - x1)) / 2 - x1
+    y = (height - (y2 - y1)) / 2 - y1
+    draw.text((x, y), text, font=font, fill=fill)
+
+
 def format_speed(mph: float | None) -> str:
     if mph is None:
         return NO_FIX_TEXT
@@ -108,41 +87,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Enviro LCD GPS speed")
     parser.add_argument("--port", default=DEFAULT_PORT)
     parser.add_argument("--baud", type=int, default=DEFAULT_BAUD)
-    parser.add_argument("--invert", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--bgr", action=argparse.BooleanOptionalAction, default=None)
     args = parser.parse_args()
-
-    file_invert, file_bgr = read_lcd_tuning()
-    invert = file_invert if args.invert is None else args.invert
-    bgr = file_bgr if args.bgr is None else args.bgr
-
-    prepare_backlight_pin()
 
     disp = st7735.ST7735(
         port=0,
         cs=1,
         dc=9,
-        backlight=BACKLIGHT_PIN,
+        backlight=12,
         rotation=270,
-        spi_speed_hz=4000000,
-        invert=invert,
-        bgr=bgr,
+        spi_speed_hz=6000000,
     )
     disp.begin()
     disp.set_backlight(1)
 
     img = Image.new("RGB", (disp.width, disp.height), BG)
     draw = ImageDraw.Draw(img)
-
-    def paint_speed(text: str) -> None:
-        max_w = disp.width - 2 * MARGIN
-        max_h = disp.height - 2 * MARGIN
-        font, tw, th = fit_font(draw, text, max_w, max_h)
-        draw.rectangle((0, 0, disp.width, disp.height), fill=BG)
-        x = (disp.width - tw) / 2
-        y = (disp.height - th) / 2
-        draw.text((x, y), text, font=font, fill=FG)
-        disp.display(img)
 
     ser: serial.Serial | None = None
     last_mph: float | None = None
@@ -181,7 +140,6 @@ def main() -> None:
         return ser is not None
 
     open_serial()
-    paint_speed(NO_FIX_TEXT)
 
     while True:
         now = time.monotonic()
@@ -202,6 +160,7 @@ def main() -> None:
         elif now - last_serial_open >= SERIAL_REOPEN_SEC:
             open_serial()
         last_mph = mph
+
         text = format_speed(mph)
         speed_due = (
             text != shown_text
@@ -210,7 +169,12 @@ def main() -> None:
         )
 
         if speed_due:
-            paint_speed(text)
+            max_w = disp.width - 2 * MARGIN
+            max_h = disp.height - 2 * MARGIN
+            font, _tw, _th = fit_font(draw, text, max_w, max_h)
+            draw.rectangle((0, 0, disp.width, disp.height), fill=BG)
+            draw_text_centered(draw, text, font, disp.width, disp.height, FG)
+            disp.display(img)
             shown_text = text
             last_speed_draw = now
 
