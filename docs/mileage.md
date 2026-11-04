@@ -71,8 +71,8 @@ Tracked when GPS fix is **A** (valid):
 
 | Record | Rule |
 |--------|------|
-| **1/8 mi** | Lowest time from **≥ 1 mph** until GPS path length reaches **0.125 mi** (drag-strip eighth) |
-| **0–60** | Lowest time from **≥ 1 mph** to **≥ 60 mph** |
+| **1/8 mi** | From **≥ 5 mph** until GPS path reaches **0.125 mi** (min **6 s**; RMC-rate samples) |
+| **0–60** | Lowest time from **≥ 5 mph** to **two consecutive ≥ 60 mph** fixes (min **4 s**) |
 | **20–60** | Lowest time from **≥ 20 mph** to **≥ 60 mph** |
 | **Top speed** | Maximum mph seen |
 

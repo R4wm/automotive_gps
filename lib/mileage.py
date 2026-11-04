@@ -22,8 +22,8 @@ REDIS_HASH_KEY = "mileage"
 
 # Parked GPS often reports 2–5 mph; integrating speed caused false miles indoors.
 EARTH_RADIUS_MI = 3958.7613
-DEFAULT_DRIVING_ENTER_MPH = 5.0
-DEFAULT_DRIVING_ENTER_SEC = 4.0
+DEFAULT_DRIVING_ENTER_MPH = 4.0
+DEFAULT_DRIVING_ENTER_SEC = 3.0
 DEFAULT_PARKED_MAX_MPH = 2.0
 DEFAULT_PARKED_HOLD_SEC = 45.0
 DEFAULT_MAX_SEGMENT_MI = 0.12
@@ -221,7 +221,13 @@ class MileageStore:
 
         if mph is None or not fix_ok or lat is None or lon is None:
             self._slow_since = None
-            self._fast_since = None
+            if not self._driving:
+                self._fast_since = None
+            return
+
+        pos = (lat, lon)
+        if self._last_pos is not None and pos == self._last_pos:
+            # Caller must tick on new RMC fixes only; ignore duplicate coords.
             return
 
         if mph >= enter_mph:
@@ -236,25 +242,25 @@ class MileageStore:
                 self._slow_since = now
             elif now - self._slow_since >= parked_sec:
                 self._driving = False
-                self._last_pos = (lat, lon)
+                self._last_pos = pos
                 self._last_pos_at = now
-        else:
+        elif not self._driving:
             self._fast_since = None
             self._slow_since = None
 
         if not self._driving:
-            self._last_pos = (lat, lon)
+            self._last_pos = pos
             self._last_pos_at = now
             return
 
         if self._last_pos is None or self._last_pos_at is None:
-            self._last_pos = (lat, lon)
+            self._last_pos = pos
             self._last_pos_at = now
             return
 
         delta = haversine_miles(self._last_pos[0], self._last_pos[1], lat, lon)
         dt = now - self._last_pos_at
-        self._last_pos = (lat, lon)
+        self._last_pos = pos
         self._last_pos_at = now
 
         if delta <= 0.0 or dt <= 0.0 or dt > 30.0:

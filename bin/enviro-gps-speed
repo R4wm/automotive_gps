@@ -528,21 +528,41 @@ def main() -> None:
                         raw.decode("ascii", errors="ignore")
                     )
                     if is_rmc:
-                        last_rmc_at = now
+                        sample_at = time.monotonic()
+                        last_rmc_at = sample_at
                         last_fix_ok = fix_ok
                         if lat_lon is not None:
                             last_lat_lon = lat_lon
                         if parsed is not None:
                             mph = parsed
-                        if records is not None and parsed is not None and fix_ok:
+                        if fix_ok and parsed is not None:
                             rlat = rlon = None
                             if lat_lon is not None:
                                 rlat, rlon = lat_lon
-                            records.tick_speed(
-                                parsed, now, fix_ok=True, lat=rlat, lon=rlon
-                            )
-                            if records.maybe_flush(now, last_records_flush):
-                                last_records_flush = now
+                            if mileage is not None and rlat is not None and rlon is not None:
+                                mileage.tick(
+                                    parsed,
+                                    sample_at,
+                                    lat=rlat,
+                                    lon=rlon,
+                                    fix_ok=True,
+                                )
+                                if mileage.maybe_flush(
+                                    sample_at, last_mileage_flush
+                                ):
+                                    last_mileage_flush = sample_at
+                            if records is not None:
+                                records.tick_speed(
+                                    parsed,
+                                    sample_at,
+                                    fix_ok=True,
+                                    lat=rlat,
+                                    lon=rlon,
+                                )
+                                if records.maybe_flush(
+                                    sample_at, last_records_flush
+                                ):
+                                    last_records_flush = sample_at
             except serial.SerialException:
                 close_serial()
         elif now - last_serial_open >= SERIAL_REOPEN_SEC:
@@ -551,20 +571,6 @@ def main() -> None:
 
         gps_live = (now - last_rmc_at) <= GPS_STALE_SEC
         display_mph = mph if gps_live else None
-
-        if mileage is not None:
-            lat = lon = None
-            if gps_live and last_fix_ok and last_lat_lon is not None:
-                lat, lon = last_lat_lon
-            mileage.tick(
-                display_mph if gps_live else None,
-                now,
-                lat=lat,
-                lon=lon,
-                fix_ok=gps_live and last_fix_ok,
-            )
-            if mileage.maybe_flush(now, last_mileage_flush):
-                last_mileage_flush = now
 
         if use_idle_art:
             ensure_idle_clips()

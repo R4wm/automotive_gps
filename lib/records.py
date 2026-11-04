@@ -21,13 +21,19 @@ DEFAULT_STATE_PATH = Path("/var/lib/automotive_gps/records.json")
 REDIS_HASH_KEY = "records"
 
 RUN_END_MPH = 60.0
-RUN_START_MPH = 1.0
+RUN_START_MPH = 5.0
 RUN_20_MPH = 20.0
+ZERO_SIXTY_MIN_SEC = 4.0
+ZERO_SIXTY_MAX_SEC = 120.0
+TWENTY_SIXTY_MIN_SEC = 2.0
+TWENTY_SIXTY_MAX_SEC = 90.0
+MAX_CREDIBLE_MPH = 165.0
+MAX_MPH_JUMP = 35.0
 EIGHTH_MILE_MI = 0.125
-EIGHTH_MIN_SEC = 4.0
+EIGHTH_MIN_SEC = 6.0
 EIGHTH_MAX_SEC = 45.0
-EIGHTH_ABORT_MPH = 2.0
-EIGHTH_MAX_SEGMENT_MI = 0.08
+EIGHTH_ABORT_MPH = 3.0
+EIGHTH_MAX_SEGMENT_MI = 0.04
 
 
 class EighthMileTracker:
@@ -57,11 +63,12 @@ class EighthMileTracker:
         if lat is None or lon is None:
             return None
 
+        pos = (lat, lon)
         if self._start is None:
             if mph < RUN_START_MPH:
                 return None
             self._start = now
-            self._last_pos = (lat, lon)
+            self._last_pos = pos
             self._dist_mi = 0.0
             return None
 
@@ -74,13 +81,13 @@ class EighthMileTracker:
             self._reset()
             return None
 
-        if self._last_pos is not None:
+        if self._last_pos is not None and pos != self._last_pos:
             delta = haversine_miles(self._last_pos[0], self._last_pos[1], lat, lon)
             if delta > EIGHTH_MAX_SEGMENT_MI:
                 self._reset()
                 return None
             self._dist_mi += delta
-        self._last_pos = (lat, lon)
+        self._last_pos = pos
 
         if self._dist_mi < EIGHTH_MILE_MI:
             return None
@@ -98,7 +105,9 @@ class AccelerationTracker:
 
     def __init__(self) -> None:
         self._zero_sixty_start: float | None = None
+        self._zero_sixty_at_60: int = 0
         self._twenty_sixty_start: float | None = None
+        self._twenty_sixty_at_60: int = 0
         self._below_20 = True
 
     def tick(self, mph: float, now: float) -> list[tuple[str, float]]:
@@ -106,29 +115,43 @@ class AccelerationTracker:
 
         if mph < 0.5:
             self._zero_sixty_start = None
+            self._zero_sixty_at_60 = 0
         elif mph < RUN_END_MPH:
+            self._zero_sixty_at_60 = 0
             if self._zero_sixty_start is None and mph >= RUN_START_MPH:
                 self._zero_sixty_start = now
         else:
             if self._zero_sixty_start is not None:
-                elapsed = now - self._zero_sixty_start
-                if 2.0 <= elapsed <= 120.0:
-                    completed.append(("0-60", elapsed))
-            self._zero_sixty_start = None
+                self._zero_sixty_at_60 += 1
+                if self._zero_sixty_at_60 >= 2:
+                    elapsed = now - self._zero_sixty_start
+                    if ZERO_SIXTY_MIN_SEC <= elapsed <= ZERO_SIXTY_MAX_SEC:
+                        completed.append(("0-60", elapsed))
+                    self._zero_sixty_start = None
+                    self._zero_sixty_at_60 = 0
+            else:
+                self._zero_sixty_at_60 = 0
 
         if mph < RUN_20_MPH - 1.0:
             self._below_20 = True
             self._twenty_sixty_start = None
+            self._twenty_sixty_at_60 = 0
         elif mph < RUN_END_MPH:
+            self._twenty_sixty_at_60 = 0
             if self._below_20 and mph >= RUN_20_MPH:
                 self._twenty_sixty_start = now
                 self._below_20 = False
         else:
             if self._twenty_sixty_start is not None:
-                elapsed = now - self._twenty_sixty_start
-                if 1.0 <= elapsed <= 90.0:
-                    completed.append(("20-60", elapsed))
-            self._twenty_sixty_start = None
+                self._twenty_sixty_at_60 += 1
+                if self._twenty_sixty_at_60 >= 2:
+                    elapsed = now - self._twenty_sixty_start
+                    if TWENTY_SIXTY_MIN_SEC <= elapsed <= TWENTY_SIXTY_MAX_SEC:
+                        completed.append(("20-60", elapsed))
+                    self._twenty_sixty_start = None
+                    self._twenty_sixty_at_60 = 0
+            else:
+                self._twenty_sixty_at_60 = 0
             self._below_20 = mph < RUN_20_MPH
 
         return completed
@@ -159,6 +182,7 @@ class PersonalRecordsStore:
         self._redis: Any = None
         self._tracker = AccelerationTracker()
         self._eighth = EighthMileTracker()
+        self._last_sample_mph: float | None = None
 
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self._apply_record(self._read_file())
@@ -311,6 +335,14 @@ class PersonalRecordsStore:
             self._pending = True
         return improved
 
+    def _filter_sample(self, mph: float) -> float | None:
+        mph = min(max(0.0, mph), MAX_CREDIBLE_MPH)
+        prev = self._last_sample_mph
+        self._last_sample_mph = mph
+        if prev is not None and abs(mph - prev) > MAX_MPH_JUMP:
+            return None
+        return mph
+
     def tick_speed(
         self,
         mph: float,
@@ -322,6 +354,10 @@ class PersonalRecordsStore:
     ) -> None:
         if not fix_ok:
             return
+        filtered = self._filter_sample(mph)
+        if filtered is None:
+            return
+        mph = filtered
         if mph > self.top_speed_mph:
             self.top_speed_mph = mph
             self._pending = True
