@@ -93,7 +93,7 @@ Mileage: `apt install redis-server python3-redis` and see [docs/mileage.md](docs
 
 **Local speed limits (OSM):** build a SQLite DB on a PC, copy to the Pi — [docs/osm-speed-limits.md](docs/osm-speed-limits.md).
 
-**At 0 mph** (GPS live), the LCD **rotates stats pages**: **1/8 mi**, **0–60**, **top speed**, **MI**, then a large **20–60** screen. Records persist in `/var/lib/automotive_gps/records.json` and Redis `automotive_gps:records`. Check with `automotive-gps-miles`. Optional GIF idle art: `--idle-image /path/to.gif` (0–3 mph). See [docs/mileage.md](docs/mileage.md).
+**At 0 mph** (GPS live), the LCD **rotates stats pages**: **1/8**, **0–60**, **TOP**, **MI**, then **20–60**, then **IP** for SSH. Records persist in `/var/lib/automotive_gps/records.json` and Redis `automotive_gps:records`. Check with `automotive-gps-miles`. Optional GIF idle art: `--idle-image /path/to.gif` (0–3 mph). See [docs/mileage.md](docs/mileage.md).
 
 ## Repository layout
 

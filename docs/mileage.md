@@ -76,4 +76,4 @@ Tracked when GPS fix is **A** (valid):
 | **20–60** | Lowest time from **≥ 20 mph** to **≥ 60 mph** |
 | **Top speed** | Maximum mph seen |
 
-Stored in **`/var/lib/automotive_gps/records.json`** and Redis hash **`automotive_gps:records`**. At **0 mph**, the Enviro LCD **rotates two pages** every few seconds (default **4 s**, `--records-page-sec`): page 1 is **1/8**, **0–60**, **TOP**, **MI**; page 2 is **20–60** large. GPS distance is approximate vs a beam trip; best for comparing your own runs.
+Stored in **`/var/lib/automotive_gps/records.json`** and Redis hash **`automotive_gps:records`**. At **0 mph**, the Enviro LCD **rotates three pages** every few seconds (default **4 s**, `--records-page-sec`): **1/8**, **0–60**, **TOP**, **MI**; then **20–60** large; then **LAN IP** (`hostname -I`) for SSH. GPS distance is approximate vs a beam trip; best for comparing your own runs.

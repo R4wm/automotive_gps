@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import signal
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ SPI_SPEED_HZ = 10_000_000  # Pimoroni Enviro examples; faster full-frame updates
 DEFAULT_IDLE_GIF_SPEED = 2.5  # multiply GIF frame rate (1 = file timing)
 IDLE_STATIC_HOLD_SEC = 2.5  # how long PNG / still frames stay up
 DEFAULT_RECORDS_PAGE_SEC = 4.0
+RECORDS_PAGE_COUNT = 3  # stats, 20-60, LAN IP
 LOOP_SLEEP_IDLE = 0.008
 LOOP_SLEEP_NORMAL = 0.025
 
@@ -255,6 +257,23 @@ def format_sec(value: float | None) -> str:
     return f"{value:.1f}s"
 
 
+def device_lan_ip() -> str:
+    """First non-loopback IPv4 (wlan0/eth0 via hostname -I on DietPi)."""
+    try:
+        out = subprocess.check_output(
+            ["hostname", "-I"],
+            text=True,
+            timeout=2,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        for token in out.split():
+            if token and not token.startswith("127."):
+                return token
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "--"
+
+
 def display_key(
     mph: float | None,
     idle_max_mph: float,
@@ -373,7 +392,7 @@ def main() -> None:
     def paint_personal_records(page: int) -> None:
         draw.rectangle((0, 0, disp.width, disp.height), fill=BG)
         odometer = int(round(mileage.odometer_miles)) if mileage else 0
-        page = page % 2
+        page = page % RECORDS_PAGE_COUNT
 
         if page == 1:
             label_font = load_font(16)
@@ -382,6 +401,22 @@ def main() -> None:
             else:
                 value_text = format_sec(records.best_twenty_sixty_sec)
             draw.text((8, 6), "20-60", font=label_font, fill=(140, 140, 140))
+            max_w = disp.width - 2 * MARGIN
+            value_top = 22
+            max_h = disp.height - value_top - MARGIN
+            font, _tw, th = fit_font(draw, value_text, max_w, max_h)
+            x1, y1, x2, y2 = draw.textbbox((0, 0), value_text, font=font)
+            tw, th = x2 - x1, y2 - y1
+            x = (disp.width - tw) / 2 - x1
+            y = value_top + (max_h - th) / 2 - y1
+            draw.text((x, y), value_text, font=font, fill=FG)
+            disp.display(img)
+            return
+
+        if page == 2:
+            label_font = load_font(16)
+            value_text = device_lan_ip()
+            draw.text((8, 6), "IP", font=label_font, fill=(140, 140, 140))
             max_w = disp.width - 2 * MARGIN
             value_top = 22
             max_h = disp.height - value_top - MARGIN
@@ -592,7 +627,7 @@ def main() -> None:
                 last_speed_draw = now
             else:
                 if now - last_records_page_flip >= page_sec:
-                    records_page = (records_page + 1) % 2
+                    records_page = (records_page + 1) % RECORDS_PAGE_COUNT
                     last_records_page_flip = now
                     paint_personal_records(records_page)
                     last_speed_draw = now
