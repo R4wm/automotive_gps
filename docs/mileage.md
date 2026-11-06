@@ -27,6 +27,8 @@ systemctl enable --now redis-server
 ```
 
 If Redis fails with “Can't open the log file”, create `/var/log/redis` as above.
+The installer also adds a systemd `LogsDirectory=redis` drop-in so it is
+recreated when Redis starts, including after DietPi clears volatile logs.
 
 Configure `/etc/default/enviro-gps-speed` (see `config/enviro-gps-speed.default`). Remote Redis:
 
@@ -54,26 +56,100 @@ redis-cli HGETALL automotive_gps:mileage
 
 Copy `/var/lib/automotive_gps/odometer.json` or pipe `automotive-gps-miles --export` into your sync script.
 
-**Parked / indoor drift:** raw NMEA speed often reads 2–5 mph while you are still; the old speed integrator could add a fake mile overnight. Mileage now waits for **≥ ~5 mph for ~4 s** before counting, uses **lat/lon steps** between fixes, and stops after **≤ ~2 mph for ~45 s**. Tune via `/etc/default/enviro-gps-speed`:
+## Accuracy and filtering
+
+Mileage uses checksum-validated, measured RMC fixes and **GPS UTC timestamps**.
+Distance is the sum of accepted position steps, not raw speed integrated while
+parked. Duplicate/backward timestamps, invalid fixes, gaps over **1.5 seconds**,
+invalid numbers/coordinates, and impossible jumps break motion continuity.
+Steps are capped at **0.12 miles** and **120 mph** implied speed by default, and
+must also be consistent with average GPS speed (at most the greater of 3× that
+speed or that speed + 15 mph). Lost-fix intervals are not estimated.
+
+Driving requires **≥4 mph for 3 seconds** by default. Accepted distance during
+that confirmation window is buffered and credited once driving is confirmed.
+Speeds **≤2 mph** suppress distance immediately, including while the parked
+hold timer runs. Sustained speeds below the driving-entry threshold end driving
+after **45 seconds**; unchanged coordinates still advance that timer.
+
+These conservative rules trade some very slow or interrupted movement for less
+parked drift. GPS position noise and receiver filtering still affect accuracy;
+curves between fixes can be undercounted. A known-distance road comparison with
+a valid fix is required to measure the real-world error. Decimal places are
+storage precision, not guaranteed GPS accuracy.
+
+Optional tuning in `/etc/default/enviro-gps-speed`:
 
 ```bash
-MILEAGE_DRIVING_ENTER_MPH=5
-MILEAGE_DRIVING_ENTER_SEC=4
+MILEAGE_DRIVING_ENTER_MPH=4
+MILEAGE_DRIVING_ENTER_SEC=3
 MILEAGE_PARKED_MAX_MPH=2
 MILEAGE_PARKED_HOLD_SEC=45
 ```
 
-**Fix a bad odometer:** edit `/var/lib/automotive_gps/odometer.json` (`odometer_miles` / `trip_miles`), then `systemctl restart enviro-gps-speed`, or run `redis-cli DEL automotive_gps:mileage` if Redis still has the inflated value.
+## Persistence and maintenance
 
-## Personal records
+JSON writes use atomic replacement and sync the file and directory to disk.
+Mileage still flushes after **30 seconds or 0.02 miles**, and on graceful stop;
+abrupt power loss can lose the unflushed increment. Redis is retried on later
+flushes if unavailable. CLI inspection is read-only and cannot overwrite newer
+in-memory totals. Startup keeps the highest odometer and the newest trip,
+including a trip that was reset to zero.
 
-Tracked when GPS fix is **A** (valid):
+**TRIP resets daily:** the first GPS fix on a new local calendar day starts
+TRIP from zero (the odometer keeps counting). The day comes from GPS time in
+the Pi's time zone, so set it (`timedatectl set-timezone ...`); on UTC the trip
+and the TODAY records roll over at UTC midnight.
+
+To reset the trip by hand, stop the GPS service first so its live totals cannot overwrite
+the reset, then restart it:
+
+```bash
+systemctl stop enviro-gps-speed
+automotive-gps-miles --reset-trip
+systemctl start enviro-gps-speed
+```
+
+## Speed records
+
+Tracked from the same checksum-validated fixes, timed with **GPS UTC
+timestamps** (so display work never changes a time):
 
 | Record | Rule |
 |--------|------|
-| **1/8 mi** | From **≥ 5 mph** until GPS path reaches **0.125 mi** (min **6 s**; RMC-rate samples) |
-| **0–60** | Lowest time from **≥ 5 mph** to **two consecutive ≥ 60 mph** fixes (min **4 s**) |
-| **20–60** | Lowest time from **≥ 20 mph** to **≥ 60 mph** |
-| **Top speed** | Maximum mph seen |
+| **1/8 mi** | From crossing **5 mph** until the GPS path reaches **0.125 mi** (6–30 s) |
+| **0–60** | From crossing **5 mph** to crossing **60 mph** (4–30 s) |
+| **20–60** | From crossing **20 mph** to crossing **60 mph** (2–30 s) |
 
-Stored in **`/var/lib/automotive_gps/records.json`** and Redis hash **`automotive_gps:records`**. At **0 mph**, the Enviro LCD **rotates three pages** every few seconds (default **4 s**, `--records-page-sec`): **1/8**, **0–60**, **TOP**, **MI**; then **20–60** large; then **LAN IP** (`hostname -I`) for SSH. GPS distance is approximate vs a beam trip; best for comparing your own runs.
+- A run starts only when speed is seen crossing its start speed from below,
+  and restarts if speed falls back under it. Cruising near 60 is never a run.
+- Crossing times are interpolated between fixes, so a 1 Hz receiver isn't
+  limited to whole seconds. A crossing of 60 needs a second fix at 60+.
+- Lost fixes, gaps over 1.5 s, duplicate/backward timestamps, speed changes
+  over 35 mph/s and position jumps inconsistent with speed cancel the run.
+- 0–60 starts at 5 mph because GPS speed is noisy near standstill, so it
+  reads a little quicker than a true standing start.
+
+**Today** is the Pi's local calendar day of the GPS time. Records persist in
+`/var/lib/automotive_gps/records.json` and Redis `automotive_gps:records`. At
+0 mph the LCD rotates **MI/TRIP**, **TODAY** and **BEST EVER** pages (default
+**4 s** each, `--stats-page-sec`). At the next stop (≤ 3 mph) after a new daily or
+best-ever record, the LCD shows `jammin_shyguy.png` (`--record-image`) with
+the time for **3 s** each (`--record-image-sec`, `0` disables). It never
+covers the speedometer while moving.
+
+Records from before this tracker may be optimistic (it could time a "0–60"
+from just under 60 mph). To clear them:
+
+```bash
+systemctl stop enviro-gps-speed
+automotive-gps-miles --reset-records
+systemctl start enviro-gps-speed
+```
+
+
+Run regression checks with:
+
+```bash
+python3 -m unittest discover -s tests -v
+```

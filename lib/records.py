@@ -1,163 +1,163 @@
-"""Personal driving records: 1/8 mi, 0–60, 20–60, top speed (Redis + JSON)."""
+"""Personal speed records (1/8 mi, 0-60, 20-60): today's and best ever."""
 
 from __future__ import annotations
 
 import json
+import math
 import os
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 from mileage import (  # same install dir on Pi
     DEFAULT_KEY_PREFIX,
     DEFAULT_REDIS_URL,
+    MAX_SAMPLE_GAP_SEC,
     _utc_now,
     default_device_id,
     haversine_miles,
+    local_day,
     redis,
 )
 
 DEFAULT_STATE_PATH = Path("/var/lib/automotive_gps/records.json")
 REDIS_HASH_KEY = "records"
 
-RUN_END_MPH = 60.0
+RECORD_KINDS = ("eighth_mile", "zero_sixty", "twenty_sixty")
+RECORD_LABELS = {"eighth_mile": "1/8", "zero_sixty": "0-60", "twenty_sixty": "20-60"}
+
 RUN_START_MPH = 5.0
 RUN_20_MPH = 20.0
-ZERO_SIXTY_MIN_SEC = 4.0
-ZERO_SIXTY_MAX_SEC = 120.0
-TWENTY_SIXTY_MIN_SEC = 2.0
-TWENTY_SIXTY_MAX_SEC = 90.0
-MAX_CREDIBLE_MPH = 165.0
-MAX_MPH_JUMP = 35.0
+RUN_END_MPH = 60.0
 EIGHTH_MILE_MI = 0.125
-EIGHTH_MIN_SEC = 6.0
-EIGHTH_MAX_SEC = 45.0
-EIGHTH_ABORT_MPH = 3.0
-EIGHTH_MAX_SEGMENT_MI = 0.04
+# Plausible (min, max) seconds; shorter is a glitch, longer is not a run.
+RUN_LIMITS_SEC = {
+    "eighth_mile": (6.0, 30.0),
+    "zero_sixty": (4.0, 30.0),
+    "twenty_sixty": (2.0, 30.0),
+}
+MAX_CREDIBLE_MPH = 165.0
+# ~1.6 g; faster speed changes between fixes are receiver glitches.
+MAX_ACCEL_MPH_PER_SEC = 35.0
 
 
-class EighthMileTracker:
-    """Time from launch to 1/8 mile (0.125 mi) using GPS position deltas."""
-
-    def __init__(self) -> None:
-        self._start: float | None = None
-        self._dist_mi = 0.0
-        self._last_pos: tuple[float, float] | None = None
-
-    def _reset(self) -> None:
-        self._start = None
-        self._dist_mi = 0.0
-        self._last_pos = None
-
-    def tick(
-        self,
-        mph: float,
-        now: float,
-        lat: float | None,
-        lon: float | None,
-    ) -> float | None:
-        if mph < 0.5:
-            self._reset()
-            return None
-
-        if lat is None or lon is None:
-            return None
-
-        pos = (lat, lon)
-        if self._start is None:
-            if mph < RUN_START_MPH:
-                return None
-            self._start = now
-            self._last_pos = pos
-            self._dist_mi = 0.0
-            return None
-
-        elapsed = now - self._start
-        if elapsed > EIGHTH_MAX_SEC:
-            self._reset()
-            return None
-
-        if mph < EIGHTH_ABORT_MPH and self._dist_mi < EIGHTH_MILE_MI * 0.5:
-            self._reset()
-            return None
-
-        if self._last_pos is not None and pos != self._last_pos:
-            delta = haversine_miles(self._last_pos[0], self._last_pos[1], lat, lon)
-            if delta > EIGHTH_MAX_SEGMENT_MI:
-                self._reset()
-                return None
-            self._dist_mi += delta
-        self._last_pos = pos
-
-        if self._dist_mi < EIGHTH_MILE_MI:
-            return None
-
-        if elapsed < EIGHTH_MIN_SEC:
-            self._reset()
-            return None
-
-        self._reset()
-        return elapsed
+def _crossing_time(t0: float, v0: float, t1: float, v1: float, target: float) -> float:
+    """Interpolate when speed passed target between two fixes."""
+    if v1 == v0:
+        return t1
+    return t0 + (target - v0) / (v1 - v0) * (t1 - t0)
 
 
-class AccelerationTracker:
-    """Detect completed 0–60 and 20–60 runs from speed samples."""
+class RunTracker:
+    """Time 1/8 mile, 0-60 and 20-60 runs from consecutive GPS fixes.
+
+    Times use receiver UTC and interpolate the threshold crossings between
+    fixes. A run only starts when speed is seen crossing its start
+    threshold from below, so a lost fix never starts one mid-acceleration.
+    0-60 and 1/8 mile start at 5 mph (GPS speed is noisy near standstill).
+    """
 
     def __init__(self) -> None:
-        self._zero_sixty_start: float | None = None
-        self._zero_sixty_at_60: int = 0
-        self._twenty_sixty_start: float | None = None
-        self._twenty_sixty_at_60: int = 0
-        self._below_20 = True
+        self.invalidate()
 
-    def tick(self, mph: float, now: float) -> list[tuple[str, float]]:
+    def invalidate(self) -> None:
+        self._last: tuple[float, float, float, float] | None = None
+        self._starts: dict[str, float] = {}
+        self._finish_at: dict[str, float] = {}
+        self._eighth_mi = 0.0
+
+    def _abort(self, kind: str) -> None:
+        self._starts.pop(kind, None)
+        self._finish_at.pop(kind, None)
+
+    def _complete(self, kind: str, finish: float, out: list[tuple[str, float]]) -> None:
+        elapsed = finish - self._starts[kind]
+        low, high = RUN_LIMITS_SEC[kind]
+        if low <= elapsed <= high:
+            out.append((kind, elapsed))
+        self._abort(kind)
+
+    def tick(self, mph: float, now: float, lat: float, lon: float) -> list[tuple[str, float]]:
+        if (
+            not all(math.isfinite(v) for v in (mph, now, lat, lon))
+            or not 0 <= mph <= MAX_CREDIBLE_MPH
+            or not -90 <= lat <= 90 or not -180 <= lon <= 180
+        ):
+            self.invalidate()
+            return []
+        last = self._last
+        if last is not None:
+            dt = now - last[0]
+            if dt <= 0:
+                self.invalidate()
+                return []
+            delta = haversine_miles(last[2], last[3], lat, lon)
+            average_speed = (last[1] + mph) * 0.5
+            if (
+                dt > MAX_SAMPLE_GAP_SEC
+                or abs(mph - last[1]) / dt > MAX_ACCEL_MPH_PER_SEC
+                or delta * 3600.0 / dt > max(average_speed * 3, average_speed + 15)
+            ):
+                # Never time across a gap or glitch; start fresh from here.
+                self.invalidate()
+                last = None
+        self._last = (now, mph, lat, lon)
+        if last is None:
+            return []
+
+        t0, v0 = last[0], last[1]
         completed: list[tuple[str, float]] = []
 
-        if mph < 0.5:
-            self._zero_sixty_start = None
-            self._zero_sixty_at_60 = 0
-        elif mph < RUN_END_MPH:
-            self._zero_sixty_at_60 = 0
-            if self._zero_sixty_start is None and mph >= RUN_START_MPH:
-                self._zero_sixty_start = now
-        else:
-            if self._zero_sixty_start is not None:
-                self._zero_sixty_at_60 += 1
-                if self._zero_sixty_at_60 >= 2:
-                    elapsed = now - self._zero_sixty_start
-                    if ZERO_SIXTY_MIN_SEC <= elapsed <= ZERO_SIXTY_MAX_SEC:
-                        completed.append(("0-60", elapsed))
-                    self._zero_sixty_start = None
-                    self._zero_sixty_at_60 = 0
-            else:
-                self._zero_sixty_at_60 = 0
+        if v0 < RUN_START_MPH <= mph:
+            start = _crossing_time(t0, v0, now, mph, RUN_START_MPH)
+            self._starts["zero_sixty"] = self._starts["eighth_mile"] = start
+            self._finish_at.pop("zero_sixty", None)
+            self._eighth_mi = delta * (now - start) / dt
+        elif mph < RUN_START_MPH:
+            self._abort("zero_sixty")
+            self._abort("eighth_mile")
+        elif "eighth_mile" in self._starts:
+            before = self._eighth_mi
+            self._eighth_mi += delta
+            if self._eighth_mi >= EIGHTH_MILE_MI:
+                finish = t0 + (EIGHTH_MILE_MI - before) / delta * dt
+                self._complete("eighth_mile", finish, completed)
 
-        if mph < RUN_20_MPH - 1.0:
-            self._below_20 = True
-            self._twenty_sixty_start = None
-            self._twenty_sixty_at_60 = 0
-        elif mph < RUN_END_MPH:
-            self._twenty_sixty_at_60 = 0
-            if self._below_20 and mph >= RUN_20_MPH:
-                self._twenty_sixty_start = now
-                self._below_20 = False
-        else:
-            if self._twenty_sixty_start is not None:
-                self._twenty_sixty_at_60 += 1
-                if self._twenty_sixty_at_60 >= 2:
-                    elapsed = now - self._twenty_sixty_start
-                    if TWENTY_SIXTY_MIN_SEC <= elapsed <= TWENTY_SIXTY_MAX_SEC:
-                        completed.append(("20-60", elapsed))
-                    self._twenty_sixty_start = None
-                    self._twenty_sixty_at_60 = 0
-            else:
-                self._twenty_sixty_at_60 = 0
-            self._below_20 = mph < RUN_20_MPH
+        if v0 < RUN_20_MPH <= mph:
+            self._starts["twenty_sixty"] = _crossing_time(t0, v0, now, mph, RUN_20_MPH)
+            self._finish_at.pop("twenty_sixty", None)
+        elif mph < RUN_20_MPH:
+            self._abort("twenty_sixty")
 
+        for kind in ("zero_sixty", "twenty_sixty"):
+            if kind not in self._starts:
+                continue
+            if kind in self._finish_at:
+                # A second fix at 60+ confirms the crossing (rejects one-fix spikes).
+                if mph >= RUN_END_MPH:
+                    self._complete(kind, self._finish_at[kind], completed)
+                else:
+                    del self._finish_at[kind]
+            elif v0 < RUN_END_MPH <= mph:
+                self._finish_at[kind] = _crossing_time(t0, v0, now, mph, RUN_END_MPH)
+
+        for kind, start in list(self._starts.items()):
+            if now - start > RUN_LIMITS_SEC[kind][1]:
+                self._abort(kind)
         return completed
 
 
+@dataclass
+class NewRecord:
+    kind: str
+    seconds: float
+    scope: str  # "best" (also today's) or "today"
+
+
 class PersonalRecordsStore:
+    """Best-ever and today's records; persisted to JSON and optional Redis."""
+
     def __init__(
         self,
         *,
@@ -165,7 +165,9 @@ class PersonalRecordsStore:
         state_path: Path | None = None,
         key_prefix: str | None = None,
         device_id: str | None = None,
+        read_only: bool = False,
     ) -> None:
+        self._read_only = read_only
         self.state_path = state_path or DEFAULT_STATE_PATH
         self.redis_url = redis_url or os.environ.get("REDIS_URL", DEFAULT_REDIS_URL)
         self.key_prefix = key_prefix or os.environ.get(
@@ -173,24 +175,30 @@ class PersonalRecordsStore:
         )
         self.device_id = device_id or default_device_id()
 
-        self.best_eighth_mile_sec: float | None = None
-        self.best_zero_sixty_sec: float | None = None
-        self.best_twenty_sixty_sec: float | None = None
-        self.top_speed_mph: float = 0.0
-        self.updated_at = _utc_now()
+        self.best: dict[str, float | None] = dict.fromkeys(RECORD_KINDS)
+        self.today: dict[str, float | None] = dict.fromkeys(RECORD_KINDS)
+        self.today_date = ""
+        self.updated_at = ""
         self._pending = False
         self._redis: Any = None
-        self._tracker = AccelerationTracker()
-        self._eighth = EighthMileTracker()
-        self._last_sample_mph: float | None = None
+        self._runs = RunTracker()
 
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self._apply_record(self._read_file())
+        if not read_only:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self._merge_record(self._read_file())
         self._connect_redis()
         redis_data = self._read_redis()
         if redis_data:
             self._merge_record(redis_data)
-        self.flush()
+        # The Pi has no RTC, but its restored clock is never ahead of real
+        # time, so an older stored day is definitely stale. GPS days take
+        # over from the first fix.
+        if self.today_date and self.today_date < date.today().isoformat():
+            self._start_day("")
+        if not self.updated_at:
+            self.updated_at = _utc_now()
+        if not read_only:
+            self.flush()
 
     def _redis_hash_name(self) -> str:
         return f"{self.key_prefix}:{REDIS_HASH_KEY}"
@@ -199,7 +207,7 @@ class PersonalRecordsStore:
         if redis is None:
             return
         try:
-            client = redis.from_url(self.redis_url, socket_connect_timeout=2)
+            client = redis.from_url(self.redis_url, socket_connect_timeout=2, socket_timeout=2)
             client.ping()
             self._redis = client
         except (OSError, redis.RedisError, redis.ConnectionError):
@@ -209,15 +217,23 @@ class PersonalRecordsStore:
         if not self.state_path.is_file():
             return {}
         try:
-            return json.loads(self.state_path.read_text())
+            data = json.loads(self.state_path.read_text())
+            return data if isinstance(data, dict) else {}
         except (OSError, json.JSONDecodeError):
             return {}
 
     def _write_file(self) -> None:
-        payload = self.snapshot()
         tmp = self.state_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, indent=2) + "\n")
+        with tmp.open("w") as handle:
+            handle.write(json.dumps(self.snapshot(), indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         tmp.replace(self.state_path)
+        directory = os.open(self.state_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
 
     def _read_redis(self) -> dict[str, Any]:
         if self._redis is None:
@@ -226,155 +242,140 @@ class PersonalRecordsStore:
             raw = self._redis.hgetall(self._redis_hash_name())
         except redis.RedisError:
             return {}
-        if not raw:
-            return {}
         out: dict[str, Any] = {}
-        for key, val in raw.items():
+        for key, val in (raw or {}).items():
             k = key.decode() if isinstance(key, bytes) else str(key)
-            v = val.decode() if isinstance(val, bytes) else val
-            out[k] = v
+            out[k] = val.decode() if isinstance(val, bytes) else val
         return out
 
     def _write_redis(self) -> None:
         if self._redis is None:
             return
-        snap = self.snapshot()
         mapping = {
-            "device_id": snap["device_id"],
-            "best_eighth_mile_sec": ""
-            if snap["best_eighth_mile_sec"] is None
-            else str(snap["best_eighth_mile_sec"]),
-            "best_zero_sixty_sec": ""
-            if snap["best_zero_sixty_sec"] is None
-            else str(snap["best_zero_sixty_sec"]),
-            "best_twenty_sixty_sec": ""
-            if snap["best_twenty_sixty_sec"] is None
-            else str(snap["best_twenty_sixty_sec"]),
-            "top_speed_mph": str(snap["top_speed_mph"]),
-            "updated_at": snap["updated_at"],
+            key: "" if value is None else str(value)
+            for key, value in self.snapshot().items()
         }
         try:
             self._redis.hset(self._redis_hash_name(), mapping=mapping)
         except redis.RedisError:
-            pass
+            self._redis = None
 
     @staticmethod
-    def _float(value: Any) -> float | None:
+    def _seconds(value: Any) -> float | None:
         if value is None or value == "":
             return None
         try:
-            return float(value)
+            parsed = float(value)
         except (TypeError, ValueError):
             return None
+        return parsed if math.isfinite(parsed) and parsed > 0 else None
 
-    def _apply_record(self, data: dict[str, Any]) -> None:
-        if not data:
-            return
-        e = self._float(data.get("best_eighth_mile_sec"))
-        z = self._float(data.get("best_zero_sixty_sec"))
-        t = self._float(data.get("best_twenty_sixty_sec"))
-        if e is not None:
-            self.best_eighth_mile_sec = e
-        if z is not None:
-            self.best_zero_sixty_sec = z
-        if t is not None:
-            self.best_twenty_sixty_sec = t
-        top = self._float(data.get("top_speed_mph"))
-        if top is not None:
-            self.top_speed_mph = top
-        if data.get("updated_at"):
+    def _merge_record(self, data: dict[str, Any]) -> None:
+        """Keep the fastest times; today's only for the newest stored day."""
+        for kind in RECORD_KINDS:
+            other = self._seconds(data.get(f"best_{kind}_sec"))
+            if other is not None and (self.best[kind] is None or other < self.best[kind]):
+                self.best[kind] = other
+        other_day = str(data.get("today_date") or "")
+        if other_day > self.today_date:
+            self._start_day(other_day)
+        if other_day and other_day == self.today_date:
+            for kind in RECORD_KINDS:
+                other = self._seconds(data.get(f"today_{kind}_sec"))
+                if other is not None and (self.today[kind] is None or other < self.today[kind]):
+                    self.today[kind] = other
+        if str(data.get("updated_at") or "") > self.updated_at:
             self.updated_at = str(data["updated_at"])
         if data.get("device_id"):
             self.device_id = str(data["device_id"])
 
-    def _merge_record(self, data: dict[str, Any]) -> None:
-        e = self._float(data.get("best_eighth_mile_sec"))
-        z = self._float(data.get("best_zero_sixty_sec"))
-        t = self._float(data.get("best_twenty_sixty_sec"))
-        if e is not None and (
-            self.best_eighth_mile_sec is None or e < self.best_eighth_mile_sec
-        ):
-            self.best_eighth_mile_sec = e
-        if z is not None and (
-            self.best_zero_sixty_sec is None or z < self.best_zero_sixty_sec
-        ):
-            self.best_zero_sixty_sec = z
-        if t is not None and (
-            self.best_twenty_sixty_sec is None or t < self.best_twenty_sixty_sec
-        ):
-            self.best_twenty_sixty_sec = t
-        top = self._float(data.get("top_speed_mph"))
-        if top is not None and top > self.top_speed_mph:
-            self.top_speed_mph = top
+    def _start_day(self, day: str) -> None:
+        self.today_date = day
+        self.today = dict.fromkeys(RECORD_KINDS)
+        self._pending = True
 
     def snapshot(self) -> dict[str, Any]:
-        return {
-            "device_id": self.device_id,
-            "best_eighth_mile_sec": self.best_eighth_mile_sec,
-            "best_zero_sixty_sec": self.best_zero_sixty_sec,
-            "best_twenty_sixty_sec": self.best_twenty_sixty_sec,
-            "top_speed_mph": round(self.top_speed_mph, 2),
-            "updated_at": self.updated_at,
-        }
+        snap: dict[str, Any] = {"device_id": self.device_id}
+        for kind in RECORD_KINDS:
+            snap[f"best_{kind}_sec"] = self.best[kind]
+        snap["today_date"] = self.today_date
+        for kind in RECORD_KINDS:
+            snap[f"today_{kind}_sec"] = self.today[kind]
+        snap["updated_at"] = self.updated_at
+        return snap
 
-    def note_run(self, kind: str, seconds: float) -> bool:
-        improved = False
-        if kind == "1/8":
-            if self.best_eighth_mile_sec is None or seconds < self.best_eighth_mile_sec:
-                self.best_eighth_mile_sec = round(seconds, 3)
-                improved = True
-        elif kind == "0-60":
-            if self.best_zero_sixty_sec is None or seconds < self.best_zero_sixty_sec:
-                self.best_zero_sixty_sec = round(seconds, 3)
-                improved = True
-        elif kind == "20-60":
-            if self.best_twenty_sixty_sec is None or seconds < self.best_twenty_sixty_sec:
-                self.best_twenty_sixty_sec = round(seconds, 3)
-                improved = True
-        if improved:
-            self._pending = True
-        return improved
+    def invalidate_sample(self) -> None:
+        """Never time a run across a lost fix, gap or serial reconnect."""
+        self._runs.invalidate()
 
-    def _filter_sample(self, mph: float) -> float | None:
-        mph = min(max(0.0, mph), MAX_CREDIBLE_MPH)
-        prev = self._last_sample_mph
-        self._last_sample_mph = mph
-        if prev is not None and abs(mph - prev) > MAX_MPH_JUMP:
-            return None
-        return mph
-
-    def tick_speed(
+    def tick(
         self,
-        mph: float,
-        now: float,
+        mph: float | None,
+        now: float | None,
         *,
-        fix_ok: bool,
         lat: float | None = None,
         lon: float | None = None,
-    ) -> None:
-        if not fix_ok:
-            return
-        filtered = self._filter_sample(mph)
-        if filtered is None:
-            return
-        mph = filtered
-        if mph > self.top_speed_mph:
-            self.top_speed_mph = mph
-            self._pending = True
-        eighth = self._eighth.tick(mph, now, lat, lon)
-        if eighth is not None:
-            self.note_run("1/8", eighth)
-        for kind, elapsed in self._tracker.tick(mph, now):
-            self.note_run(kind, elapsed)
+        fix_ok: bool = False,
+    ) -> list[NewRecord]:
+        """Process one RMC fix at receiver UTC time; return any new records."""
+        if not fix_ok or mph is None or now is None or lat is None or lon is None:
+            self.invalidate_sample()
+            return []
+        try:
+            day = local_day(now)
+        except (OverflowError, OSError, ValueError):
+            self.invalidate_sample()
+            return []
+        if day > self.today_date:
+            self._start_day(day)
+        new: list[NewRecord] = []
+        for kind, seconds in self._runs.tick(mph, now, lat, lon):
+            seconds = round(seconds, 2)
+            scope = None
+            if self.today[kind] is None or seconds < self.today[kind]:
+                self.today[kind] = seconds
+                scope = "today"
+            if self.best[kind] is None or seconds < self.best[kind]:
+                self.best[kind] = seconds
+                scope = "best"
+            if scope is not None:
+                self._pending = True
+                new.append(NewRecord(kind, seconds, scope))
+        return new
 
-    def maybe_flush(self, now: float, last_flush: float, interval_sec: float = 30.0) -> bool:
-        if not self._pending and (now - last_flush) < interval_sec:
+    def reset(self) -> None:
+        self.best = dict.fromkeys(RECORD_KINDS)
+        self._start_day("")
+        self.flush()
+
+    def maybe_flush(self) -> bool:
+        """Write only when something changed (spares the SD card)."""
+        if not self._pending:
             return False
         self.flush()
         return True
 
     def flush(self) -> None:
+        if self._read_only:
+            raise RuntimeError("Cannot write a read-only records snapshot")
         self.updated_at = _utc_now()
         self._write_file()
+        if self._redis is None:
+            self._connect_redis()
         self._write_redis()
         self._pending = False
+
+
+def load_snapshot(
+    *,
+    state_path: Path | None = None,
+    redis_url: str | None = None,
+    key_prefix: str | None = None,
+) -> dict[str, Any]:
+    store = PersonalRecordsStore(
+        state_path=state_path,
+        redis_url=redis_url,
+        key_prefix=key_prefix,
+        read_only=True,
+    )
+    return store.snapshot()
