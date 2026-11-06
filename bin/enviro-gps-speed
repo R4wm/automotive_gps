@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -21,10 +21,15 @@ if _MILEAGE_LIB.is_dir():
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from mileage import MileageStore  # noqa: E402
-from records import PersonalRecordsStore  # noqa: E402
+from mileage import MAX_SAMPLE_GAP_SEC, MileageStore  # noqa: E402
+from gps_rmc import parse_rmc_line, parse_rmc_timestamp  # noqa: E402
+from records import (  # noqa: E402
+    RECORD_KINDS,
+    RECORD_LABELS,
+    NewRecord,
+    PersonalRecordsStore,
+)
 
-KNOTS_TO_MPH = 1.15078
 DEFAULT_PORT = "/dev/ttyUSB0"
 DEFAULT_BAUD = 4800
 DEFAULT_IDLE_DIR = Path("/usr/local/share/automotive_gps")
@@ -33,8 +38,10 @@ DEFAULT_IDLE_MAX_MPH = 3.0
 SPI_SPEED_HZ = 10_000_000  # Pimoroni Enviro examples; faster full-frame updates
 DEFAULT_IDLE_GIF_SPEED = 2.5  # multiply GIF frame rate (1 = file timing)
 IDLE_STATIC_HOLD_SEC = 2.5  # how long PNG / still frames stay up
-DEFAULT_RECORDS_PAGE_SEC = 4.0
-RECORDS_PAGE_COUNT = 3  # stats, 20-60, LAN IP
+DEFAULT_STATS_PAGE_SEC = 4.0
+STATS_PAGE_COUNT = 3  # mileage, today's records, best-ever records
+DEFAULT_RECORD_IMAGE = DEFAULT_IDLE_DIR / "jammin_shyguy.png"
+DEFAULT_RECORD_IMAGE_SEC = 3.0
 LOOP_SLEEP_IDLE = 0.008
 LOOP_SLEEP_NORMAL = 0.025
 
@@ -59,64 +66,6 @@ FG = (255, 255, 255)
 NO_FIX_TEXT = "--"
 NO_GPS_TEXT = "--"
 GPS_STALE_SEC = 5.0
-
-
-def _nmea_degrees(raw: str) -> float:
-    """Convert NMEA ddmm.mmmm to decimal degrees."""
-    value = float(raw)
-    degrees = int(value / 100)
-    minutes = value - degrees * 100
-    return degrees + minutes / 60.0
-
-
-def parse_rmc_lat_lon(parts: list[str]) -> tuple[float, float] | None:
-    if len(parts) < 7:
-        return None
-    lat_raw, lat_dir, lon_raw, lon_dir = (
-        parts[3],
-        parts[4],
-        parts[5],
-        parts[6],
-    )
-    if not lat_raw or not lon_raw or lat_dir not in ("N", "S") or lon_dir not in (
-        "W",
-        "E",
-    ):
-        return None
-    try:
-        lat = _nmea_degrees(lat_raw)
-        lon = _nmea_degrees(lon_raw)
-    except ValueError:
-        return None
-    if lat_dir == "S":
-        lat = -lat
-    if lon_dir == "W":
-        lon = -lon
-    return lat, lon
-
-
-def parse_rmc_line(
-    line: str,
-) -> tuple[bool, float | None, bool, tuple[float, float] | None]:
-    """Return (is_rmc, mph, fix_ok, lat_lon). mph set for A or 0.0 for V."""
-    line = line.strip()
-    if len(line) < 10 or line[0] != "$":
-        return False, None, False, None
-    if not line.split(",", 1)[0].endswith("RMC"):
-        return False, None, False, None
-    parts = line.split(",")
-    if len(parts) < 8:
-        return True, 0.0, False, None
-    if parts[2] == "V":
-        return True, 0.0, False, None
-    if parts[2] != "A":
-        return True, None, False, None
-    lat_lon = parse_rmc_lat_lon(parts)
-    try:
-        knots = float(parts[7])
-    except ValueError:
-        return True, 0.0, True, lat_lon
-    return True, max(0.0, knots * KNOTS_TO_MPH), True, lat_lon
 
 
 def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -161,6 +110,12 @@ def format_speed(mph: float | None, *, gps_live: bool) -> str:
     if mph is None:
         return NO_GPS_TEXT if not gps_live else "0"
     return str(int(round(mph)))
+
+
+def format_sec(value: float | None) -> str:
+    if value is None:
+        return "--"
+    return f"{value:.1f}s"
 
 
 def compose_idle_frame(source: Image.Image, width: int, height: int) -> Image.Image:
@@ -251,29 +206,6 @@ def load_idle_playlist(
     return clips
 
 
-def format_sec(value: float | None) -> str:
-    if value is None:
-        return "--"
-    return f"{value:.1f}s"
-
-
-def device_lan_ip() -> str:
-    """First non-loopback IPv4 (wlan0/eth0 via hostname -I on DietPi)."""
-    try:
-        out = subprocess.check_output(
-            ["hostname", "-I"],
-            text=True,
-            timeout=2,
-            stderr=subprocess.DEVNULL,
-        ).strip()
-        for token in out.split():
-            if token and not token.startswith("127."):
-                return token
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return "--"
-
-
 def display_key(
     mph: float | None,
     idle_max_mph: float,
@@ -288,7 +220,7 @@ def display_key(
     if idle_enabled and shown <= int(round(idle_max_mph)):
         return "idle"
     if shown == 0 and gps_live:
-        return "records"
+        return "stats"
     return f"text:{text}"
 
 
@@ -302,7 +234,7 @@ def main() -> None:
         type=Path,
         default=None,
         dest="idle_image",
-        help="Optional PNG/GIF at 0–idle-max mph (default: personal records at 0 mph)",
+        help="Optional PNG/GIF at 0–idle-max mph (default: mileage and records at 0 mph)",
     )
     parser.add_argument(
         "--idle-dir",
@@ -335,10 +267,29 @@ def main() -> None:
         help="Do not record distance to Redis/JSON",
     )
     parser.add_argument(
+        "--no-records",
+        action="store_true",
+        help="Do not track 1/8 mile, 0-60 and 20-60 records",
+    )
+    parser.add_argument(
+        "--stats-page-sec",
         "--records-page-sec",
         type=float,
-        default=DEFAULT_RECORDS_PAGE_SEC,
+        default=DEFAULT_STATS_PAGE_SEC,
+        dest="stats_page_sec",
         help="Seconds per stats page at 0 mph (default: 4)",
+    )
+    parser.add_argument(
+        "--record-image",
+        type=Path,
+        default=DEFAULT_RECORD_IMAGE,
+        help="Image shown with a new daily or best-ever record",
+    )
+    parser.add_argument(
+        "--record-image-sec",
+        type=float,
+        default=DEFAULT_RECORD_IMAGE_SEC,
+        help="Seconds to show each new record at the next stop (0 disables; default: 3)",
     )
     args = parser.parse_args()
 
@@ -362,18 +313,18 @@ def main() -> None:
     gif_speed = max(args.idle_gif_speed, 0.1)
 
     mileage: MileageStore | None = None
-    records: PersonalRecordsStore | None = None
     last_mileage_flush = time.monotonic()
-    last_records_flush = time.monotonic()
+    records: PersonalRecordsStore | None = None
+    celebrations: list[NewRecord] = []
+    celebrate_until = 0.0
+    record_badge: Image.Image | None = None
+    stats_page = 0
+    last_stats_page_flip = 0.0
 
     ser: serial.Serial | None = None
     last_mph: float | None = None
-    last_lat_lon: tuple[float, float] | None = None
-    last_fix_ok = False
     last_rmc_at = 0.0
     last_speed_draw = 0.0
-    records_page = 0
-    last_records_page_flip = 0.0
     last_idle_anim = 0.0
     idle_clip_index = 0
     idle_frame_index = 0
@@ -389,67 +340,55 @@ def main() -> None:
         draw_text_centered(draw, text, font, disp.width, disp.height, FG)
         disp.display(img)
 
-    def paint_personal_records(page: int) -> None:
+    def paint_mileage() -> None:
         draw.rectangle((0, 0, disp.width, disp.height), fill=BG)
-        odometer = int(round(mileage.odometer_miles)) if mileage else 0
-        page = page % RECORDS_PAGE_COUNT
+        label_font = load_font(14)
+        rows = (
+            ("MI", f"{mileage.odometer_miles:.2f}" if mileage else "--"),
+            ("TRIP", f"{mileage.trip_miles:.2f}" if mileage else "--"),
+        )
+        for y, (label, value) in zip((5, 43), rows):
+            draw.text((6, y), label, font=label_font, fill=(140, 140, 140))
+            font, _, _ = fit_font(draw, value, disp.width - 54, 30)
+            x1, y1, _, _ = draw.textbbox((0, 0), value, font=font)
+            draw.text((54 - x1, y - y1), value, font=font, fill=FG)
+        disp.display(img)
 
-        if page == 1:
-            label_font = load_font(16)
-            if records is None:
-                value_text = "--"
-            else:
-                value_text = format_sec(records.best_twenty_sixty_sec)
-            draw.text((8, 6), "20-60", font=label_font, fill=(140, 140, 140))
-            max_w = disp.width - 2 * MARGIN
-            value_top = 22
-            max_h = disp.height - value_top - MARGIN
-            font, _tw, th = fit_font(draw, value_text, max_w, max_h)
-            x1, y1, x2, y2 = draw.textbbox((0, 0), value_text, font=font)
-            tw, th = x2 - x1, y2 - y1
-            x = (disp.width - tw) / 2 - x1
-            y = value_top + (max_h - th) / 2 - y1
-            draw.text((x, y), value_text, font=font, fill=FG)
-            disp.display(img)
-            return
-
-        if page == 2:
-            label_font = load_font(16)
-            value_text = device_lan_ip()
-            draw.text((8, 6), "IP", font=label_font, fill=(140, 140, 140))
-            max_w = disp.width - 2 * MARGIN
-            value_top = 22
-            max_h = disp.height - value_top - MARGIN
-            font, _tw, th = fit_font(draw, value_text, max_w, max_h)
-            x1, y1, x2, y2 = draw.textbbox((0, 0), value_text, font=font)
-            tw, th = x2 - x1, y2 - y1
-            x = (disp.width - tw) / 2 - x1
-            y = value_top + (max_h - th) / 2 - y1
-            draw.text((x, y), value_text, font=font, fill=FG)
-            disp.display(img)
-            return
-
-        if records is None:
-            rows = [
-                ("1/8", "--"),
-                ("0-60", "--"),
-                ("TOP", "--"),
-                ("MI", str(odometer)),
-            ]
-        else:
-            rows = [
-                ("1/8", format_sec(records.best_eighth_mile_sec)),
-                ("0-60", format_sec(records.best_zero_sixty_sec)),
-                ("TOP", str(int(round(records.top_speed_mph)))),
-                ("MI", str(odometer)),
-            ]
+    def paint_records(title: str, values: dict[str, float | None]) -> None:
+        draw.rectangle((0, 0, disp.width, disp.height), fill=BG)
         label_font = load_font(14)
         value_font = load_font(17)
-        y = 5
-        for label, value in rows:
-            draw.text((6, y), label, font=label_font, fill=(140, 140, 140))
-            draw.text((72, y - 1), value, font=value_font, fill=FG)
-            y += 19
+        draw.text((6, 5), title, font=label_font, fill=(140, 140, 140))
+        for y, kind in zip((24, 43, 62), RECORD_KINDS):
+            draw.text((6, y), RECORD_LABELS[kind], font=label_font, fill=(140, 140, 140))
+            draw.text((72, y - 1), format_sec(values[kind]), font=value_font, fill=FG)
+        disp.display(img)
+
+    def paint_stats(page: int) -> None:
+        page %= STATS_PAGE_COUNT
+        if page == 0 or records is None:
+            paint_mileage()
+        elif page == 1:
+            paint_records("TODAY", records.today)
+        else:
+            paint_records("BEST EVER", records.best)
+
+    def paint_celebration(record: NewRecord) -> None:
+        nonlocal record_badge
+        if record_badge is None:
+            badge = load_idle_clip(args.record_image, disp.height, disp.height, 1.0)
+            record_badge = badge.frames[0] if badge else Image.new("RGB", (1, 1), BG)
+        draw.rectangle((0, 0, disp.width, disp.height), fill=BG)
+        img.paste(record_badge, (0, 0))
+        left = disp.height + 2 if record_badge.width > 1 else MARGIN
+        max_w = disp.width - left - MARGIN
+        header = "NEW BEST" if record.scope == "best" else "TODAY"
+        draw.text((left, 4), header, font=load_font(14), fill=(255, 200, 0))
+        draw.text((left, 22), RECORD_LABELS[record.kind], font=load_font(17), fill=FG)
+        value = format_sec(record.seconds)
+        font, _, _ = fit_font(draw, value, max_w, 32)
+        x1, y1, _, _ = draw.textbbox((0, 0), value, font=font)
+        draw.text((left - x1, 44 - y1), value, font=font, fill=FG)
         disp.display(img)
 
     def ensure_idle_clips() -> None:
@@ -538,16 +477,16 @@ def main() -> None:
 
     paint_speed_text(NO_FIX_TEXT)
 
-    if not args.no_mileage:
+    if not args.no_mileage and os.environ.get("MILEAGE_DISABLE", "").lower() not in ("1", "true", "yes"):
         try:
             mileage = MileageStore()
         except OSError:
             mileage = None
-    try:
-        records = PersonalRecordsStore()
-    except OSError:
-        records = None
-
+    if not args.no_records:
+        try:
+            records = PersonalRecordsStore()
+        except OSError:
+            records = None
     open_serial()
 
     while True:
@@ -559,51 +498,62 @@ def main() -> None:
                     raw = ser.readline()
                     if not raw:
                         break
-                    is_rmc, parsed, fix_ok, lat_lon = parse_rmc_line(
-                        raw.decode("ascii", errors="ignore")
-                    )
+                    line = raw.decode("ascii", errors="replace")
+                    is_rmc, parsed, fix_ok, lat_lon = parse_rmc_line(line)
                     if is_rmc:
                         sample_at = time.monotonic()
                         last_rmc_at = sample_at
-                        last_fix_ok = fix_ok
-                        if lat_lon is not None:
-                            last_lat_lon = lat_lon
+                        if not fix_ok:
+                            mph = None
+                            if mileage is not None:
+                                mileage.invalidate_sample()
+                            if records is not None:
+                                records.invalidate_sample()
                         if parsed is not None:
                             mph = parsed
                         if fix_ok and parsed is not None:
                             rlat = rlon = None
                             if lat_lon is not None:
                                 rlat, rlon = lat_lon
+                            fix_at = parse_rmc_timestamp(line)
                             if mileage is not None and rlat is not None and rlon is not None:
                                 mileage.tick(
                                     parsed,
-                                    sample_at,
+                                    fix_at,
                                     lat=rlat,
                                     lon=rlon,
                                     fix_ok=True,
                                 )
-                                if mileage.maybe_flush(
-                                    sample_at, last_mileage_flush
-                                ):
-                                    last_mileage_flush = sample_at
                             if records is not None:
-                                records.tick_speed(
-                                    parsed,
-                                    sample_at,
-                                    fix_ok=True,
-                                    lat=rlat,
-                                    lon=rlon,
+                                celebrations.extend(
+                                    records.tick(
+                                        parsed,
+                                        fix_at,
+                                        lat=rlat,
+                                        lon=rlon,
+                                        fix_ok=True,
+                                    )
                                 )
-                                if records.maybe_flush(
-                                    sample_at, last_records_flush
-                                ):
-                                    last_records_flush = sample_at
             except serial.SerialException:
                 close_serial()
+                if mileage is not None:
+                    mileage.invalidate_sample()
+                if records is not None:
+                    records.invalidate_sample()
         elif now - last_serial_open >= SERIAL_REOPEN_SEC:
             open_serial()
         last_mph = mph
 
+        now = time.monotonic()
+        if now - last_rmc_at > MAX_SAMPLE_GAP_SEC:
+            if mileage is not None:
+                mileage.invalidate_sample()
+            if records is not None:
+                records.invalidate_sample()
+        if mileage is not None and mileage.maybe_flush(now, last_mileage_flush):
+            last_mileage_flush = now
+        if records is not None:
+            records.maybe_flush()
         gps_live = (now - last_rmc_at) <= GPS_STALE_SEC
         display_mph = mph if gps_live else None
 
@@ -617,23 +567,42 @@ def main() -> None:
             gps_live=gps_live,
         )
 
-        if key == "records":
-            page_sec = max(args.records_page_sec, 1.0)
+        # Show new records at the next stop, never over the speedometer.
+        # Runs are timed from GPS timestamps, so drawing here never changes
+        # a measured time.
+        if args.record_image_sec <= 0:
+            celebrations.clear()
+        stopped = (
+            display_mph is not None
+            and int(round(display_mph)) <= int(round(args.idle_max_mph))
+        )
+        if not stopped:
+            celebrate_until = 0.0
+        elif now >= celebrate_until and celebrations:
+            paint_celebration(celebrations.pop(0))
+            celebrate_until = now + args.record_image_sec
+            shown_key = "record"
+        if now < celebrate_until:
+            key = "record"
+
+        if key == "record":
+            pass
+        elif key == "stats":
+            page_sec = max(args.stats_page_sec, 1.0)
             if key != shown_key:
-                records_page = 0
-                last_records_page_flip = now
-                paint_personal_records(records_page)
+                stats_page = 0
+                last_stats_page_flip = now
+                paint_stats(stats_page)
                 shown_key = key
                 last_speed_draw = now
-            else:
-                if now - last_records_page_flip >= page_sec:
-                    records_page = (records_page + 1) % RECORDS_PAGE_COUNT
-                    last_records_page_flip = now
-                    paint_personal_records(records_page)
-                    last_speed_draw = now
-                elif now - last_speed_draw >= 2.0:
-                    paint_personal_records(records_page)
-                    last_speed_draw = now
+            elif now - last_stats_page_flip >= page_sec:
+                stats_page = (stats_page + 1) % STATS_PAGE_COUNT
+                last_stats_page_flip = now
+                paint_stats(stats_page)
+                last_speed_draw = now
+            elif now - last_speed_draw >= 2.0:
+                paint_stats(stats_page)
+                last_speed_draw = now
         elif key == "idle":
             if key != shown_key:
                 reset_idle_playback()
@@ -653,7 +622,7 @@ def main() -> None:
 
         if key == "idle" and idle_clips:
             time.sleep(LOOP_SLEEP_IDLE)
-        elif key == "records":
+        elif key == "stats":
             time.sleep(0.15)
         else:
             time.sleep(LOOP_SLEEP_NORMAL)

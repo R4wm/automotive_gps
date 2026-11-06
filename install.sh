@@ -24,6 +24,10 @@ if [[ -f "$ROOT/lib/mileage.py" ]]; then
   install -d /usr/local/lib/automotive_gps
   install -m 644 "$ROOT/lib/mileage.py" /usr/local/lib/automotive_gps/mileage.py
 fi
+if [[ -f "$ROOT/lib/gps_rmc.py" ]]; then
+  install -d /usr/local/lib/automotive_gps
+  install -m 644 "$ROOT/lib/gps_rmc.py" /usr/local/lib/automotive_gps/gps_rmc.py
+fi
 if [[ -f "$ROOT/lib/records.py" ]]; then
   install -d /usr/local/lib/automotive_gps
   install -m 644 "$ROOT/lib/records.py" /usr/local/lib/automotive_gps/records.py
@@ -61,6 +65,12 @@ install -m 644 "$ROOT/systemd/car-wifi.service" /etc/systemd/system/car-wifi.ser
 install -d /etc/systemd/system/dietpi-wifi-monitor.service.d
 install -m 644 "$ROOT/systemd/dietpi-wifi-monitor.service.d/car-wifi.conf" \
   /etc/systemd/system/dietpi-wifi-monitor.service.d/car-wifi.conf
+
+if command -v redis-server >/dev/null 2>&1; then
+  install -d /etc/systemd/system/redis-server.service.d
+  install -m 644 "$ROOT/systemd/redis-server.service.d/automotive-gps.conf" \
+    /etc/systemd/system/redis-server.service.d/automotive-gps.conf
+fi
 
 install -d /etc/car-wifi
 install -m 644 "$ROOT/docs/car-wifi.md" /etc/car-wifi/README
