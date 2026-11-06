@@ -93,7 +93,7 @@ Mileage: `apt install redis-server python3-redis` and see [docs/mileage.md](docs
 
 **Local speed limits (OSM):** build a SQLite DB on a PC, copy to the Pi — [docs/osm-speed-limits.md](docs/osm-speed-limits.md).
 
-**At 0 mph** (GPS live), the LCD **rotates stats pages**: **MI/TRIP**, then **TODAY** (1/8, 0–60, 20–60), then **BEST EVER**. At the next stop after a new daily or best-ever record, the LCD shows `jammin_shyguy.png` with the time for 3 s (`--record-image-sec`, 0 disables). TRIP and TODAY reset at local midnight (set the Pi's time zone). Mileage persists in `/var/lib/automotive_gps/odometer.json` and Redis `automotive_gps:mileage`; records in `/var/lib/automotive_gps/records.json` and Redis `automotive_gps:records`. Check both with `automotive-gps-miles`. Optional GIF idle art: `--idle-image /path/to.gif` (0–3 mph). See [docs/mileage.md](docs/mileage.md).
+**At 0 mph** (GPS live), the LCD **rotates stats pages**: **MI/TRIP**, then **TODAY** (1/8, 0–60, 20–60), then **BEST EVER**, then the **clock and IP address**. 0–60 and 1/8 mile are timed from an estimated standing launch. At the next stop after a new daily or best-ever record, the LCD shows `jammin_shyguy.png` with the time for 3 s (`--record-image-sec`, 0 disables). TRIP and TODAY reset at local midnight (set the Pi's time zone). Mileage persists in `/var/lib/automotive_gps/odometer.json` and Redis `automotive_gps:mileage`; records in `/var/lib/automotive_gps/records.json` and Redis `automotive_gps:records`. Check both with `automotive-gps-miles`. Optional GIF idle art: `--idle-image /path/to.gif` (0–3 mph). See [docs/mileage.md](docs/mileage.md).
 
 ## Repository layout
 

@@ -117,29 +117,41 @@ timestamps** (so display work never changes a time):
 
 | Record | Rule |
 |--------|------|
-| **1/8 mi** | From crossing **5 mph** until the GPS path reaches **0.125 mi** (6–30 s) |
-| **0–60** | From crossing **5 mph** to crossing **60 mph** (4–30 s) |
+| **1/8 mi** | From launch until **0.125 mi** covered (6–30 s) |
+| **0–60** | From launch to crossing **60 mph** (4–30 s) |
 | **20–60** | From crossing **20 mph** to crossing **60 mph** (2–30 s) |
 
-- A run starts only when speed is seen crossing its start speed from below,
-  and restarts if speed falls back under it. Cruising near 60 is never a run.
-- Crossing times are interpolated between fixes, so a 1 Hz receiver isn't
-  limited to whole seconds. A crossing of 60 needs a second fix at 60+.
+- 0–60 and 1/8 mile need a **standing start**: a fix at or under 2 mph, then
+  5 mph within 5 s of launch. They restart only after the next stop if speed
+  falls back under 5 mph. A rolling start only counts for 20–60.
+- **Launch** is estimated between fixes: the early acceleration is
+  extrapolated back to 0 mph. At 1 fix per second the car can leave up to a
+  second after the last stopped fix; timing from the 5 mph crossing (as before)
+  read about 0.35 s quick.
+- The 1/8 mile distance integrates GPS (Doppler) speed, which is far more
+  precise than 1 Hz positions, and the receiver holds position still near
+  standstill. The finish is solved within the last interval.
+- 20–60 starts when speed is seen crossing 20 mph from below. Cruising near 60
+  is never a run. Crossing times are interpolated between fixes, and a
+  crossing of 60 needs a second fix at 60+.
 - Lost fixes, gaps over 1.5 s, duplicate/backward timestamps, speed changes
-  over 35 mph/s and position jumps inconsistent with speed cancel the run.
-- 0–60 starts at 5 mph because GPS speed is noisy near standstill, so it
-  reads a little quicker than a true standing start.
+  over 35 mph/s and gross position jumps cancel the run.
+- No rollout is subtracted (drag strips and many 0–60 tests start after the
+  first foot, which reads roughly 0.2–0.3 s quicker).
+- The receiver reports once per second, so expect about ±0.1 s.
 
 **Today** is the Pi's local calendar day of the GPS time. Records persist in
 `/var/lib/automotive_gps/records.json` and Redis `automotive_gps:records`. At
-0 mph the LCD rotates **MI/TRIP**, **TODAY** and **BEST EVER** pages (default
-**4 s** each, `--stats-page-sec`). At the next stop (≤ 3 mph) after a new daily or
-best-ever record, the LCD shows `jammin_shyguy.png` (`--record-image`) with
-the time for **3 s** each (`--record-image-sec`, `0` disables). It never
-covers the speedometer while moving.
+0 mph the LCD rotates **MI/TRIP**, **TODAY**, **BEST EVER**, then the **clock
+and IP address** on one page (default **4 s** each, `--stats-page-sec`). The
+clock follows GPS time, since the Pi has no RTC. At the next stop (≤ 3 mph)
+after a new daily or best-ever record, the LCD shows `jammin_shyguy.png`
+(`--record-image`) with the time for **3 s** each (`--record-image-sec`, `0`
+disables). It never covers the speedometer while moving.
 
-Records from before this tracker may be optimistic (it could time a "0–60"
-from just under 60 mph). To clear them:
+Times stored with older timing (`timing_version` below 2, which started at
+5 mph) are dropped on startup because they are not comparable. To clear
+records by hand:
 
 ```bash
 systemctl stop enviro-gps-speed

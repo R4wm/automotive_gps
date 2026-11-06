@@ -27,10 +27,16 @@ REDIS_HASH_KEY = "records"
 RECORD_KINDS = ("eighth_mile", "zero_sixty", "twenty_sixty")
 RECORD_LABELS = {"eighth_mile": "1/8", "zero_sixty": "0-60", "twenty_sixty": "20-60"}
 
+# Bump when timing changes; stored times from another version are dropped.
+TIMING_VERSION = 2
+
+STOPPED_MPH = 2.0
 RUN_START_MPH = 5.0
 RUN_20_MPH = 20.0
 RUN_END_MPH = 60.0
 EIGHTH_MILE_MI = 0.125
+# A standing start must show 5 mph within this long of the estimated launch.
+LAUNCH_WINDOW_SEC = 5.0
 # Plausible (min, max) seconds; shorter is a glitch, longer is not a run.
 RUN_LIMITS_SEC = {
     "eighth_mile": (6.0, 30.0),
@@ -49,13 +55,46 @@ def _crossing_time(t0: float, v0: float, t1: float, v1: float, target: float) ->
     return t0 + (target - v0) / (v1 - v0) * (t1 - t0)
 
 
+def _segment_miles(v0: float, v1: float, seconds: float) -> float:
+    return (v0 + v1) * 0.5 * seconds / 3600.0
+
+
+def _time_to_cover(t0: float, v0: float, t1: float, v1: float, miles: float) -> float:
+    """When the car covered miles after t0, with speed changing linearly to t1."""
+    target = miles * 3600.0  # mph-seconds
+    accel = (v1 - v0) / (t1 - t0)
+    if abs(accel) < 1e-9:
+        return t0 + target / v0
+    return t0 + (math.sqrt(max(v0 * v0 + 2.0 * accel * target, 0.0)) - v0) / accel
+
+
+def _launch_time(fixes: list[tuple[float, float]]) -> float:
+    """Estimate when the car left a stop.
+
+    fixes holds the last stopped fix and the first two moving ones. The
+    second moving interval gives the launch acceleration (the first one may
+    still contain standing time); extrapolating back to 0 mph finds the
+    launch, kept between where the first interval's line reaches 0 mph and
+    the first moving fix.
+    """
+    (ts, vs), (t1, v1), (t2, v2) = fixes
+    earliest = ts - vs * (t1 - ts) / (v1 - vs)
+    accel = (v2 - v1) / (t2 - t1)
+    launch = t1 - v1 / accel if accel > 0 else earliest
+    return min(max(launch, earliest), t1)
+
+
 class RunTracker:
     """Time 1/8 mile, 0-60 and 20-60 runs from consecutive GPS fixes.
 
-    Times use receiver UTC and interpolate the threshold crossings between
-    fixes. A run only starts when speed is seen crossing its start
-    threshold from below, so a lost fix never starts one mid-acceleration.
-    0-60 and 1/8 mile start at 5 mph (GPS speed is noisy near standstill).
+    Times use receiver UTC. 0-60 and 1/8 mile need a standing start: a fix
+    at or below 2 mph, then 5 mph within a few seconds. They are timed from
+    the launch estimated by extrapolating the early acceleration back to
+    0 mph, because at 1 fix per second the car can leave the line up to a
+    second after the last stopped fix. The 1/8 mile distance integrates
+    Doppler speed rather than summing positions, which are noisy and held
+    still by the receiver near standstill. 20-60 is a rolling run from an
+    observed 20 mph crossing. Threshold crossings interpolate between fixes.
     """
 
     def __init__(self) -> None:
@@ -65,7 +104,10 @@ class RunTracker:
         self._last: tuple[float, float, float, float] | None = None
         self._starts: dict[str, float] = {}
         self._finish_at: dict[str, float] = {}
-        self._eighth_mi = 0.0
+        self._launch_fixes: list[tuple[float, float]] | None = None
+        self._launch_at: float | None = None
+        self._launched = False
+        self._launch_mi = 0.0
 
     def _abort(self, kind: str) -> None:
         self._starts.pop(kind, None)
@@ -77,6 +119,47 @@ class RunTracker:
         if low <= elapsed <= high:
             out.append((kind, elapsed))
         self._abort(kind)
+
+    def _stopped(self, now: float, mph: float) -> None:
+        self._launch_fixes = [(now, mph)]
+        self._launch_at = None
+        self._launched = False
+        self._launch_mi = 0.0
+        self._abort("zero_sixty")
+        self._abort("eighth_mile")
+
+    def _track_launch(
+        self, t0: float, v0: float, now: float, mph: float, out: list[tuple[str, float]]
+    ) -> None:
+        fixes = self._launch_fixes
+        if fixes is None:
+            return
+        if self._launch_at is None:
+            fixes.append((now, mph))
+            if len(fixes) < 3:
+                return
+            self._launch_at = _launch_time(fixes)
+            (t1, v1), (t2, v2) = fixes[1], fixes[2]
+            self._launch_mi = _segment_miles(0.0, v1, t1 - self._launch_at)
+            self._launch_mi += _segment_miles(v1, v2, t2 - t1)
+        else:
+            before = self._launch_mi
+            self._launch_mi += _segment_miles(v0, mph, now - t0)
+            if "eighth_mile" in self._starts and self._launch_mi >= EIGHTH_MILE_MI:
+                finish = _time_to_cover(t0, v0, now, mph, EIGHTH_MILE_MI - before)
+                self._complete("eighth_mile", finish, out)
+
+        if self._launched:
+            if mph < RUN_START_MPH:
+                self._abort("zero_sixty")
+                self._abort("eighth_mile")
+                self._launch_fixes = None
+        elif mph >= RUN_START_MPH:
+            self._launched = True
+            if now - self._launch_at <= LAUNCH_WINDOW_SEC:
+                self._starts["zero_sixty"] = self._starts["eighth_mile"] = self._launch_at
+            else:
+                self._launch_fixes = None  # rolled away too slowly
 
     def tick(self, mph: float, now: float, lat: float, lon: float) -> list[tuple[str, float]]:
         if (
@@ -97,32 +180,24 @@ class RunTracker:
             if (
                 dt > MAX_SAMPLE_GAP_SEC
                 or abs(mph - last[1]) / dt > MAX_ACCEL_MPH_PER_SEC
-                or delta * 3600.0 / dt > max(average_speed * 3, average_speed + 15)
+                # Loose: the receiver holds position still at low speed and
+                # then catches up, so only gross jumps count as glitches.
+                or delta * 3600.0 / dt > max(average_speed * 3, average_speed + 30)
             ):
                 # Never time across a gap or glitch; start fresh from here.
                 self.invalidate()
                 last = None
         self._last = (now, mph, lat, lon)
+        if mph <= STOPPED_MPH:
+            self._stopped(now, mph)
         if last is None:
             return []
 
         t0, v0 = last[0], last[1]
         completed: list[tuple[str, float]] = []
 
-        if v0 < RUN_START_MPH <= mph:
-            start = _crossing_time(t0, v0, now, mph, RUN_START_MPH)
-            self._starts["zero_sixty"] = self._starts["eighth_mile"] = start
-            self._finish_at.pop("zero_sixty", None)
-            self._eighth_mi = delta * (now - start) / dt
-        elif mph < RUN_START_MPH:
-            self._abort("zero_sixty")
-            self._abort("eighth_mile")
-        elif "eighth_mile" in self._starts:
-            before = self._eighth_mi
-            self._eighth_mi += delta
-            if self._eighth_mi >= EIGHTH_MILE_MI:
-                finish = t0 + (EIGHTH_MILE_MI - before) / delta * dt
-                self._complete("eighth_mile", finish, completed)
+        if mph > STOPPED_MPH:
+            self._track_launch(t0, v0, now, mph, completed)
 
         if v0 < RUN_20_MPH <= mph:
             self._starts["twenty_sixty"] = _crossing_time(t0, v0, now, mph, RUN_20_MPH)
@@ -272,6 +347,11 @@ class PersonalRecordsStore:
 
     def _merge_record(self, data: dict[str, Any]) -> None:
         """Keep the fastest times; today's only for the newest stored day."""
+        if data.get("device_id"):
+            self.device_id = str(data["device_id"])
+        if str(data.get("timing_version") or "1") != str(TIMING_VERSION):
+            # Older timing started at 5 mph, so its times are not comparable.
+            return
         for kind in RECORD_KINDS:
             other = self._seconds(data.get(f"best_{kind}_sec"))
             if other is not None and (self.best[kind] is None or other < self.best[kind]):
@@ -286,8 +366,6 @@ class PersonalRecordsStore:
                     self.today[kind] = other
         if str(data.get("updated_at") or "") > self.updated_at:
             self.updated_at = str(data["updated_at"])
-        if data.get("device_id"):
-            self.device_id = str(data["device_id"])
 
     def _start_day(self, day: str) -> None:
         self.today_date = day
@@ -295,7 +373,7 @@ class PersonalRecordsStore:
         self._pending = True
 
     def snapshot(self) -> dict[str, Any]:
-        snap: dict[str, Any] = {"device_id": self.device_id}
+        snap: dict[str, Any] = {"device_id": self.device_id, "timing_version": TIMING_VERSION}
         for kind in RECORD_KINDS:
             snap[f"best_{kind}_sec"] = self.best[kind]
         snap["today_date"] = self.today_date

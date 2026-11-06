@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import os
 import signal
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import ST7735 as st7735
@@ -39,7 +41,8 @@ SPI_SPEED_HZ = 10_000_000  # Pimoroni Enviro examples; faster full-frame updates
 DEFAULT_IDLE_GIF_SPEED = 2.5  # multiply GIF frame rate (1 = file timing)
 IDLE_STATIC_HOLD_SEC = 2.5  # how long PNG / still frames stay up
 DEFAULT_STATS_PAGE_SEC = 4.0
-STATS_PAGE_COUNT = 3  # mileage, today's records, best-ever records
+STATS_PAGE_COUNT = 4  # mileage, today's records, best-ever records, clock + IP
+IP_REFRESH_SEC = 15.0
 DEFAULT_RECORD_IMAGE = DEFAULT_IDLE_DIR / "jammin_shyguy.png"
 DEFAULT_RECORD_IMAGE_SEC = 3.0
 LOOP_SLEEP_IDLE = 0.008
@@ -206,6 +209,23 @@ def load_idle_playlist(
     return clips
 
 
+def device_lan_ip() -> str:
+    """First non-loopback IPv4 (wlan0/eth0 via hostname -I on DietPi)."""
+    try:
+        out = subprocess.check_output(
+            ["hostname", "-I"],
+            text=True,
+            timeout=2,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        for token in out.split():
+            if token and not token.startswith("127.") and ":" not in token:
+                return token
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "--"
+
+
 def display_key(
     mph: float | None,
     idle_max_mph: float,
@@ -320,6 +340,11 @@ def main() -> None:
     record_badge: Image.Image | None = None
     stats_page = 0
     last_stats_page_flip = 0.0
+    lan_ip = "--"
+    lan_ip_checked = -IP_REFRESH_SEC
+    # The Pi has no RTC and may boot offline, so the clock follows GPS time.
+    gps_utc: float | None = None
+    gps_utc_at = 0.0
 
     ser: serial.Serial | None = None
     last_mph: float | None = None
@@ -364,9 +389,33 @@ def main() -> None:
             draw.text((72, y - 1), format_sec(values[kind]), font=value_font, fill=FG)
         disp.display(img)
 
+    def paint_clock_ip() -> None:
+        nonlocal lan_ip, lan_ip_checked
+        now = time.monotonic()
+        if now - lan_ip_checked >= IP_REFRESH_SEC:
+            lan_ip = device_lan_ip()
+            lan_ip_checked = now
+        if gps_utc is not None:
+            clock = datetime.fromtimestamp(gps_utc + now - gps_utc_at)
+        else:
+            clock = datetime.now()
+        text = clock.strftime("%I:%M %p").lstrip("0")
+        draw.rectangle((0, 0, disp.width, disp.height), fill=BG)
+        font, tw, _ = fit_font(draw, text, disp.width - 2 * MARGIN, 40)
+        x1, y1, _, _ = draw.textbbox((0, 0), text, font=font)
+        draw.text(((disp.width - tw) / 2 - x1, 6 - y1), text, font=font, fill=FG)
+        label_font = load_font(14)
+        draw.text((6, 57), "IP", font=label_font, fill=(140, 140, 140))
+        font, _, _ = fit_font(draw, lan_ip, disp.width - 34, 18)
+        x1, y1, _, y2 = draw.textbbox((0, 0), lan_ip, font=font)
+        draw.text((28 - x1, 66 - (y2 - y1) / 2 - y1), lan_ip, font=font, fill=FG)
+        disp.display(img)
+
     def paint_stats(page: int) -> None:
         page %= STATS_PAGE_COUNT
-        if page == 0 or records is None:
+        if page == 3:
+            paint_clock_ip()
+        elif page == 0 or records is None:
             paint_mileage()
         elif page == 1:
             paint_records("TODAY", records.today)
@@ -516,6 +565,8 @@ def main() -> None:
                             if lat_lon is not None:
                                 rlat, rlon = lat_lon
                             fix_at = parse_rmc_timestamp(line)
+                            if fix_at is not None:
+                                gps_utc, gps_utc_at = fix_at, sample_at
                             if mileage is not None and rlat is not None and rlon is not None:
                                 mileage.tick(
                                     parsed,
